@@ -1,0 +1,1110 @@
+// class.tsx (teacher page) — updated to fetch & review excuseLetter in-app
+import { Ionicons } from "@expo/vector-icons";
+import DateTimePicker from "@react-native-community/datetimepicker";
+import { useFocusEffect } from "@react-navigation/native";
+import { router, useLocalSearchParams } from "expo-router";
+
+import {
+  collection,
+  doc,
+  getDocs,
+  onSnapshot,
+  query,
+  setDoc,
+  where,
+} from "firebase/firestore";
+import React, { useEffect, useRef, useState } from "react";
+import {
+  Alert,
+  Animated,
+  Dimensions,
+  ImageBackground,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  TouchableWithoutFeedback,
+  View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { WebView } from "react-native-webview";
+import { db } from "../../../firebaseConfig";
+
+type Student = {
+  id: string;
+  studentID: string;
+  name: string;
+  status: "Present" | "Absent";
+  excuseStatus?: "Pending" | "Approved" | "Denied";
+};
+
+type ClassInfo = {
+  grade: number;
+  className: string;
+  teacherName: string;
+};
+
+type ExcuseLetter = {
+  id?: string;
+  studentID?: string;
+  date?: string;
+  file?: string; // base64
+  fileName?: string;
+  name?: string;
+  reason?: string;
+  status?: string;
+  time?: string;
+  teacherComment?: string;
+};
+
+export default function ClassAttendanceScreen() {
+  const { classID } = useLocalSearchParams<{ classID: string }>(); // ✅ Dynamic classID
+  const [students, setStudents] = useState<Student[]>([]);
+  const [classInfo, setClassInfo] = useState<ClassInfo | null>(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [page, setPage] = useState(1);
+  const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
+  const [comment, setComment] = useState("");
+  const [selectedDate, setSelectedDate] = useState(new Date());
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [excuseUnsubscribe, setExcuseUnsubscribe] = useState<
+    (() => void) | null
+  >(null);
+  const [excuseLetters, setExcuseLetters] = useState<Record<string, string>>(
+    {}
+  );
+
+  // New states for excuse letter
+  const [excuseLetter, setExcuseLetter] = useState<ExcuseLetter | null>(null);
+  const [showPdf, setShowPdf] = useState(false);
+
+  const slideAnim = useRef(
+    new Animated.Value(Dimensions.get("window").height)
+  ).current;
+
+  const studentsPerPage = 10;
+  const totalPages = Math.max(1, Math.ceil(students.length / studentsPerPage));
+  const startIdx = (page - 1) * studentsPerPage;
+  const currentStudents = students.slice(startIdx, startIdx + studentsPerPage);
+
+  const presentCount = students.filter((s) => s.status === "Present").length;
+  const absentCount = students.filter((s) => s.status === "Absent").length;
+
+  // Add this NEW useEffect to listen for excuse letters in real-time
+  useEffect(() => {
+    if (!classID) return;
+
+    const dateStr = getMalaysiaDateString(selectedDate);
+
+    // Query all excuse letters for this date and class
+    const excuseQuery = query(
+      collection(db, "excuseLetter"),
+      where("date", "==", dateStr)
+    );
+
+    const unsubscribe = onSnapshot(excuseQuery, (snapshot) => {
+      const excuseMap: Record<string, string> = {};
+
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        // Map studentID to their excuse letter status
+        if (data.studentID) {
+          excuseMap[data.studentID] = data.status || "Pending";
+        }
+      });
+
+      setExcuseLetters(excuseMap);
+    });
+
+    return () => unsubscribe();
+  }, [selectedDate, classID]);
+
+  // Reset date to Malaysia current date when screen is focused
+  useFocusEffect(
+    React.useCallback(() => {
+      const now = new Date();
+      setSelectedDate(now);
+    }, [])
+  );
+
+  // Add this useEffect for real-time class info
+  useEffect(() => {
+    if (!classID) return;
+
+    const classQuery = query(
+      collection(db, "classes"),
+      where("classID", "==", classID)
+    );
+
+    const unsubscribe = onSnapshot(classQuery, async (classSnapshot) => {
+      if (!classSnapshot.empty) {
+        const classData = classSnapshot.docs[0].data();
+
+        let teacherName = "No teacher assigned";
+        if (classData.teacherID) {
+          const teacherQuery = query(
+            collection(db, "Teacher"),
+            where("id", "==", classData.teacherID)
+          );
+          const teacherSnapshot = await getDocs(teacherQuery);
+          if (!teacherSnapshot.empty) {
+            const teacherData = teacherSnapshot.docs[0].data();
+            teacherName = teacherData.fullName || "Unknown Teacher";
+          }
+        }
+
+        setClassInfo({
+          grade: classData.grade,
+          className: classData.className,
+          teacherName,
+        });
+      }
+    });
+
+    return () => unsubscribe();
+  }, [classID]);
+
+  // Fetch class info and students whenever selectedDate or classID changes
+  useEffect(() => {
+    if (!classID) return;
+
+    // Real-time listener for students and attendance
+    const dateStr = getMalaysiaDateString(selectedDate);
+
+    const studentQuery = query(
+      collection(db, "students"),
+      where("classID", "==", classID)
+    );
+
+    const attendanceQuery = query(
+      collection(db, "attendance"),
+      where("date", "==", dateStr),
+      where("classID", "==", classID)
+    );
+
+    // Listener for students
+    const unsubscribeStudents = onSnapshot(studentQuery, (studentSnap) => {
+      const studentList = studentSnap.docs.map((docItem) => ({
+        id: docItem.id,
+        ...docItem.data(),
+      })) as { id: string; name: string; studentID: string }[];
+
+      // Listener for attendance (nested to have access to studentList)
+      const unsubscribeAttendance = onSnapshot(
+        attendanceQuery,
+        (attendanceSnap) => {
+          const attendanceMap: Record<string, "Present" | "Absent"> = {};
+          attendanceSnap.forEach((docItem) => {
+            const data = docItem.data();
+            const status = data.status === 1 ? "Present" : "Absent";
+            attendanceMap[data.studentID] = status;
+          });
+
+          const combined = studentList.map((student) => ({
+            id: student.id,
+            studentID: student.studentID,
+            name: student.name,
+            status: attendanceMap[student.studentID] || "Absent",
+            excuseStatus: excuseLetters[student.studentID] as
+              | "Pending"
+              | "Approved"
+              | "Denied"
+              | undefined,
+          }));
+
+          setStudents(combined);
+        }
+      );
+
+      // Store unsubscribeAttendance for cleanup
+      return () => unsubscribeAttendance();
+    });
+
+    // Cleanup function
+    return () => {
+      unsubscribeStudents();
+    };
+  }, [selectedDate, classID, excuseLetters]);
+
+  const fetchClassInfo = async () => {
+    try {
+      if (!classID) return;
+
+      const classQuery = query(
+        collection(db, "classes"),
+        where("classID", "==", classID)
+      );
+      const classSnapshot = await getDocs(classQuery);
+
+      if (!classSnapshot.empty) {
+        const classData = classSnapshot.docs[0].data();
+
+        let teacherName = "No teacher assigned";
+        if (classData.teacherID) {
+          const teacherQuery = query(
+            collection(db, "Teacher"),
+            where("id", "==", classData.teacherID)
+          );
+          const teacherSnapshot = await getDocs(teacherQuery);
+          if (!teacherSnapshot.empty) {
+            const teacherData = teacherSnapshot.docs[0].data();
+            teacherName = teacherData.fullName || "Unknown Teacher";
+          }
+        }
+
+        setClassInfo({
+          grade: classData.grade,
+          className: classData.className,
+          teacherName,
+        });
+      }
+    } catch (error) {
+      console.error("❌ Error fetching class info:", error);
+    }
+  };
+
+  const getExcuseStatusColor = (status?: string) => {
+    switch (status) {
+      case "Pending":
+        return "#FF9800"; // Yellow/Orange
+      case "Approved":
+        return "#4CAF50"; // Green
+      case "Denied":
+        return "#E53935"; // Red
+      default:
+        return "transparent"; // No indicator if no excuse letter
+    }
+  };
+
+  {
+    /*const fetchData = async () => {
+    try {
+      if (!classID) return;
+
+      // Fetch students for this class
+      const studentQuery = query(
+        collection(db, "students"),
+        where("classID", "==", classID)
+      );
+      const studentSnap = await getDocs(studentQuery);
+      const studentList = studentSnap.docs.map((docItem) => ({
+        id: docItem.id,
+        ...docItem.data(),
+      })) as { id: string; name: string; studentID: string }[];
+
+      // Fetch attendance for selected date
+      const dateStr = getMalaysiaDateString(selectedDate);
+
+      const attendanceRef = collection(db, "attendance");
+      const q = query(
+        attendanceRef,
+        where("date", "==", dateStr),
+        where("classID", "==", classID)
+      );
+      const attendanceSnap = await getDocs(q);
+
+      const attendanceMap: Record<string, "Present" | "Absent"> = {};
+      attendanceSnap.forEach((docItem) => {
+        const data = docItem.data();
+        const status = data.status === 1 ? "Present" : "Absent";
+        attendanceMap[data.studentID] = status;
+      });
+
+      const combined = studentList.map((student) => ({
+        id: student.id,
+        studentID: student.studentID,
+        name: student.name,
+        status: attendanceMap[student.studentID] || "Absent",
+      }));
+
+      setStudents(combined);
+    } catch (error) {
+      console.error("❌ Error fetching data:", error);
+    }
+  };*/
+  }
+
+  const handleStatusChange = (id: string, status: "Present" | "Absent") => {
+    const updated = students.map((s) => (s.id === id ? { ...s, status } : s));
+    setStudents(updated);
+  };
+
+  const toggleEdit = async () => {
+    if (isEditing) {
+      try {
+        const dateStr = getMalaysiaDateString(selectedDate);
+
+        for (const student of students) {
+          const attendanceRef = doc(
+            db,
+            "attendance",
+            `${dateStr}_${student.studentID}`
+          );
+
+          await setDoc(attendanceRef, {
+            studentID: student.studentID,
+            name: student.name,
+            classID: classID,
+            date: dateStr,
+            status: student.status === "Present" ? 1 : 0,
+          });
+        }
+
+        console.log("✅ Attendance successfully updated in Firestore");
+        alert("Attendance successfully updated!");
+      } catch (error) {
+        console.error("❌ Error updating attendance:", error);
+        alert("Error updating attendance");
+      }
+    }
+
+    setIsEditing((prev) => !prev);
+  };
+
+  const changeDate = (days: number) => {
+    const newDate = new Date(selectedDate);
+    newDate.setDate(newDate.getDate() + days);
+    setSelectedDate(newDate);
+  };
+
+  const onDateChange = (event: any, date?: Date) => {
+    setShowDatePicker(Platform.OS === "ios");
+    if (date) {
+      setSelectedDate(date);
+    }
+  };
+
+  const openOverlay = async (student: Student) => {
+    setSelectedStudent(student);
+    setComment("");
+    setShowPdf(false);
+    setExcuseLetter(null);
+
+    const dateStr = getMalaysiaDateString(selectedDate);
+    const docId = `${dateStr}_${student.studentID}`;
+
+    // Set up real-time listener for excuse letter
+    const excuseRef = doc(db, "excuseLetter", docId);
+    const unsubscribe = onSnapshot(excuseRef, (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        setExcuseLetter({
+          id: docId,
+          studentID: data.studentID,
+          date: data.date,
+          file: data.file,
+          fileName: data.fileName,
+          name: data.name,
+          reason: data.reason,
+          status: data.status,
+          time: data.time,
+          teacherComment: data.teacherComment,
+        });
+        setComment(data.teacherComment || "");
+      } else {
+        setExcuseLetter(null);
+      }
+    });
+
+    // Store unsubscribe function to clean up later
+    // You'll need to add state for this
+    setExcuseUnsubscribe(() => unsubscribe);
+
+    Animated.timing(slideAnim, {
+      toValue: 0,
+      duration: 300,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const closeOverlay = () => {
+    // Unsubscribe from excuse letter listener
+    if (excuseUnsubscribe) {
+      excuseUnsubscribe();
+      setExcuseUnsubscribe(null);
+    }
+
+    Animated.timing(slideAnim, {
+      toValue: Dimensions.get("window").height,
+      duration: 300,
+      useNativeDriver: true,
+    }).start(() => {
+      setSelectedStudent(null);
+      setExcuseLetter(null);
+      setShowPdf(false);
+      setComment("");
+    });
+  };
+
+  // --- New: fetch excuse letter document by docId (date_studentID)
+  {
+    /*const fetchExcuseLetter = async (docId: string) => {
+    try {
+      const docRef = doc(db, "excuseLetter", docId);
+      const snap = await getDoc(docRef);
+      if (snap.exists()) {
+        const data = snap.data();
+        setExcuseLetter({
+          id: docId,
+          studentID: data.studentID,
+          date: data.date,
+          file: data.file,
+          fileName: data.fileName,
+          name: data.name,
+          reason: data.reason,
+          status: data.status,
+          time: data.time,
+          teacherComment: data.teacherComment,
+        });
+        setComment(data.teacherComment || "");
+      } else {
+        setExcuseLetter(null);
+      }
+    } catch (err) {
+      console.error("❌ Error fetching excuse letter:", err);
+      setExcuseLetter(null);
+    }
+  };*/
+  }
+
+  // Open PDF inside app using WebView and data URI
+  const openPdfInApp = () => {
+    if (!excuseLetter?.file) {
+      Alert.alert("No file", "No PDF file found for this submission.");
+      return;
+    }
+    setShowPdf(true);
+  };
+
+  // Approve / Deny handlers: set status and teacherComment in Firestore (merge)
+  const updateExcuseStatus = async (newStatus: "Approved" | "Denied") => {
+    if (!excuseLetter?.id) {
+      Alert.alert("No submission", "No excuse letter to update.");
+      return;
+    }
+
+    try {
+      const docRef = doc(db, "excuseLetter", excuseLetter.id);
+      await setDoc(
+        docRef,
+        {
+          status: newStatus,
+          teacherComment: comment || "",
+        },
+        { merge: true }
+      );
+
+      // update local state
+      setExcuseLetter((prev) =>
+        prev ? { ...prev, status: newStatus, teacherComment: comment } : prev
+      );
+
+      Alert.alert("Success", `Submission ${newStatus.toLowerCase()}.`);
+    } catch (err) {
+      console.error("❌ Error updating status:", err);
+      Alert.alert("Error", "Failed to update submission status.");
+    }
+  };
+
+  const formatDate = (date: Date) => {
+    return date.toLocaleDateString("en-MY", {
+      weekday: "short",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      timeZone: "Asia/Kuala_Lumpur",
+    });
+  };
+
+  const getMalaysiaDateString = (date: Date) => {
+    const options: Intl.DateTimeFormatOptions = {
+      timeZone: "Asia/Kuala_Lumpur",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    };
+
+    const formatter = new Intl.DateTimeFormat("en-CA", options);
+    const parts = formatter.formatToParts(date);
+
+    const year = parts.find((p) => p.type === "year")?.value || "";
+    const month = parts.find((p) => p.type === "month")?.value || "";
+    const day = parts.find((p) => p.type === "day")?.value || "";
+
+    return `${year}-${month}-${day}`;
+  };
+
+  return (
+    <SafeAreaView style={styles.container}>
+      {/* Header */}
+      <View style={styles.header}>
+        <TouchableOpacity onPress={() => router.push("/home")}>
+          <Ionicons name="arrow-back" size={22} color="#fff" />
+        </TouchableOpacity>
+        <Text style={styles.title}>
+          {classInfo
+            ? `${classInfo.grade} ${classInfo.className}`
+            : "Loading..."}
+        </Text>
+        <View style={{ width: 22 }} />
+      </View>
+
+      {/* Class Info with Background Image */}
+      <ImageBackground
+        source={require("C:/Users/haika/Documents/IIUM DEGREE/BuddyWheels/buddywheels/assets/images/card.png")}
+        style={styles.classInfoBackground}
+        resizeMode="cover"
+      >
+        <View style={styles.classInfoOverlay}>
+          <Text style={styles.teacher}>
+            Class Teacher: {classInfo?.teacherName || "Loading..."}
+          </Text>
+
+          {/* Date Navigation */}
+          <View style={styles.dateNavigation}>
+            <TouchableOpacity
+              onPress={() => changeDate(-1)}
+              style={styles.dateArrow}
+            >
+              <Ionicons name="chevron-back" size={24} color="#fff" />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={() => setShowDatePicker(true)}
+              style={styles.dateDisplay}
+            >
+              <Ionicons name="calendar-outline" size={18} color="#2E7D32" />
+              <Text style={styles.date}>{formatDate(selectedDate)}</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={() => changeDate(1)}
+              style={styles.dateArrow}
+            >
+              <Ionicons name="chevron-forward" size={24} color="#fff" />
+            </TouchableOpacity>
+          </View>
+
+          {showDatePicker && (
+            <DateTimePicker
+              value={selectedDate}
+              mode="date"
+              display="default"
+              onChange={onDateChange}
+            />
+          )}
+
+          <View style={styles.statsContainer}>
+            <View style={[styles.statBox, { backgroundColor: "#E8F8E0" }]}>
+              <Text style={styles.statNumber}>{presentCount}</Text>
+              <Text style={styles.statLabel}>Present</Text>
+            </View>
+            <View style={[styles.statBox, { backgroundColor: "#FDE8E8" }]}>
+              <Text style={[styles.statNumber, { color: "#E53935" }]}>
+                {absentCount}
+              </Text>
+              <Text style={[styles.statLabel, { color: "#E53935" }]}>
+                Absent
+              </Text>
+            </View>
+          </View>
+        </View>
+      </ImageBackground>
+
+      {/* Table Section */}
+      <ScrollView style={styles.tableContainer}>
+        <View style={styles.tableHeaderRow}>
+          <Text style={[styles.tableHeaderText, { flex: 3 }]}>Name</Text>
+          <Text
+            style={[styles.tableHeaderText, { flex: 0.5, textAlign: "center" }]}
+          >
+            {/* Empty header for indicator column */}
+          </Text>
+          <Text
+            style={[styles.tableHeaderText, { flex: 1, textAlign: "center" }]}
+          >
+            Status
+          </Text>
+          <TouchableOpacity onPress={toggleEdit} style={styles.editButton}>
+            <Text style={styles.editButtonText}>
+              {isEditing ? "Save" : "Edit"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {currentStudents.map((item) => (
+          <View key={item.id} style={styles.tableRow}>
+            {/* Name Column */}
+            <View style={{ flex: 3 }}>
+              <Text style={styles.tableText}>{item.name}</Text>
+            </View>
+
+            {/* Indicator Column - Fixed width */}
+            <View
+              style={{
+                flex: 0.5,
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              {item.excuseStatus && (
+                <View
+                  style={[
+                    styles.excuseIndicator,
+                    {
+                      backgroundColor: getExcuseStatusColor(item.excuseStatus),
+                    },
+                  ]}
+                />
+              )}
+            </View>
+
+            {/* Status Column */}
+            <View style={[styles.tableCell, { flex: 1 }]}>
+              {isEditing ? (
+                <View style={styles.editButtons}>
+                  <TouchableOpacity
+                    style={[
+                      styles.statusBtn,
+                      item.status === "Present"
+                        ? styles.presentSelected
+                        : styles.unselectedBtn,
+                    ]}
+                    onPress={() => handleStatusChange(item.id, "Present")}
+                  >
+                    <Text
+                      style={[
+                        styles.btnText,
+                        item.status === "Present"
+                          ? { color: "#fff" }
+                          : { color: "#000" },
+                      ]}
+                    >
+                      P
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.statusBtn,
+                      item.status === "Absent"
+                        ? styles.absentSelected
+                        : styles.unselectedBtn,
+                    ]}
+                    onPress={() => handleStatusChange(item.id, "Absent")}
+                  >
+                    <Text
+                      style={[
+                        styles.btnText,
+                        item.status === "Absent"
+                          ? { color: "#fff" }
+                          : { color: "#000" },
+                      ]}
+                    >
+                      A
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <TouchableOpacity
+                  disabled={item.status !== "Absent"}
+                  onPress={() => openOverlay(item)}
+                >
+                  <Text
+                    style={[
+                      styles.statusText,
+                      {
+                        color:
+                          item.status === "Present" ? "#388E3C" : "#E53935",
+                        textDecorationLine:
+                          item.status === "Absent" ? "underline" : "none",
+                      },
+                    ]}
+                  >
+                    {item.status}
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+        ))}
+      </ScrollView>
+
+      {/* Pagination */}
+      <View style={styles.pagination}>
+        <TouchableOpacity
+          disabled={page === 1}
+          onPress={() => setPage(page - 1)}
+          style={[styles.pageButton, page === 1 && styles.disabledPage]}
+        >
+          <Ionicons name="chevron-back" size={20} color="#fff" />
+        </TouchableOpacity>
+        <Text style={styles.pageText}>
+          Page {page} / {totalPages}
+        </Text>
+        <TouchableOpacity
+          disabled={page === totalPages}
+          onPress={() => setPage(page + 1)}
+          style={[
+            styles.pageButton,
+            page === totalPages && styles.disabledPage,
+          ]}
+        >
+          <Ionicons name="chevron-forward" size={20} color="#fff" />
+        </TouchableOpacity>
+      </View>
+
+      {/* Overlay */}
+      {selectedStudent && (
+        <Animated.View
+          style={[
+            styles.overlayContainer,
+            { transform: [{ translateY: slideAnim }] },
+          ]}
+        >
+          <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+            <View style={{ flex: 1 }} />
+          </TouchableWithoutFeedback>
+
+          <KeyboardAvoidingView
+            behavior={Platform.OS === "ios" ? "padding" : "height"}
+            style={{ maxHeight: "80%" }}
+          >
+            <ScrollView
+              style={styles.overlayContent}
+              keyboardShouldPersistTaps="handled"
+            >
+              <Text style={styles.overlayName}>{selectedStudent.name}</Text>
+              <Text style={styles.overlayDate}>{formatDate(selectedDate)}</Text>
+              <Text style={styles.excuseHeader}>Excuse Letter</Text>
+
+              <View style={styles.excuseTable}>
+                <View style={styles.excuseRow}>
+                  <Text style={styles.excuseLabel}>Submission Review</Text>
+                  <Text
+                    style={[
+                      styles.excuseValue,
+                      excuseLetter?.status === "Pending" && {
+                        color: "#FF9800",
+                        fontWeight: "bold",
+                      },
+                      excuseLetter?.status === "Approved" && {
+                        color: "#2E7D32",
+                        fontWeight: "bold",
+                      },
+                      excuseLetter?.status === "Denied" && {
+                        color: "#E53935",
+                        fontWeight: "bold",
+                      },
+                    ]}
+                  >
+                    {excuseLetter?.status || "No submission yet"}
+                  </Text>
+                </View>
+
+                <View style={styles.excuseRow}>
+                  <Text style={styles.excuseLabel}>Submitted On</Text>
+                  <Text style={styles.excuseValue}>
+                    {/* keep previous behaviour — not modified */}
+                    {/* If you want the computed remaining time show here, we could reuse parent's computePendingTimeText */}
+                    {excuseLetter?.time
+                      ? new Date(excuseLetter.time).toLocaleString()
+                      : "—"}
+                  </Text>
+                </View>
+
+                <View style={styles.excuseRow}>
+                  <Text style={styles.excuseLabel}>File Submission</Text>
+                  <View style={{ flex: 2 }}>
+                    {excuseLetter?.fileName ? (
+                      <>
+                        <TouchableOpacity onPress={openPdfInApp}>
+                          <Text
+                            style={{ color: "#67BA03", fontWeight: "bold" }}
+                          >
+                            {excuseLetter.fileName}
+                          </Text>
+                        </TouchableOpacity>
+                        <Text
+                          style={{ fontSize: 12, color: "#777", marginTop: 4 }}
+                        >
+                          Tap to open inside app
+                        </Text>
+                      </>
+                    ) : (
+                      <Text style={styles.excuseValue}>No file</Text>
+                    )}
+                  </View>
+                </View>
+
+                <View style={styles.excuseRow}>
+                  <Text style={styles.excuseLabel}>Comments</Text>
+                  <TextInput
+                    style={styles.commentInput}
+                    placeholder="Add teacher comments..."
+                    placeholderTextColor="#b9b3b3ff"
+                    value={comment}
+                    onChangeText={setComment}
+                    multiline
+                  />
+                </View>
+              </View>
+
+              {/* In-app PDF viewer area */}
+              {showPdf && excuseLetter?.file && (
+                <View style={{ height: 420, marginBottom: 12 }}>
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      marginBottom: 6,
+                    }}
+                  >
+                    <Text style={{ fontWeight: "600" }}>
+                      {excuseLetter.fileName}
+                    </Text>
+                    <TouchableOpacity onPress={() => setShowPdf(false)}>
+                      <Text style={{ color: "#E53935", fontWeight: "bold" }}>
+                        Close PDF
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                  <WebView
+                    originWhitelist={["*"]}
+                    source={{
+                      uri: `data:application/pdf;base64,${excuseLetter.file}`,
+                    }}
+                    style={{ flex: 1, borderRadius: 8, overflow: "hidden" }}
+                    // On some Android devices large base64 PDFs might be problematic; in that case consider uploading to storage and loading via URL
+                  />
+                </View>
+              )}
+
+              <View style={styles.overlayButtons}>
+                <TouchableOpacity
+                  style={styles.approveBtn}
+                  onPress={() =>
+                    Alert.alert("Approve", "Approve this submission?", [
+                      { text: "Cancel", style: "cancel" },
+                      {
+                        text: "Approve",
+                        onPress: () => updateExcuseStatus("Approved"),
+                      },
+                    ])
+                  }
+                >
+                  <Text style={styles.btnActionText}>APPROVE</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.denyBtn}
+                  onPress={() =>
+                    Alert.alert("Deny", "Deny this submission?", [
+                      { text: "Cancel", style: "cancel" },
+                      {
+                        text: "Deny",
+                        onPress: () => updateExcuseStatus("Denied"),
+                      },
+                    ])
+                  }
+                >
+                  <Text style={styles.btnActionText}>DENY</Text>
+                </TouchableOpacity>
+              </View>
+
+              <TouchableOpacity onPress={closeOverlay} style={styles.closeBtn}>
+                <Text style={styles.closeBtnText}>Close</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </KeyboardAvoidingView>
+        </Animated.View>
+      )}
+    </SafeAreaView>
+  );
+}
+
+// ⚠️ Keep your existing styles
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: "#F7F8FA" },
+  header: {
+    backgroundColor: "#67BA03",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 22,
+    paddingHorizontal: 20,
+  },
+  title: { color: "#fff", fontSize: 18, fontWeight: "bold" },
+  classInfoBackground: { width: "100%" },
+  classInfoOverlay: { paddingVertical: 15, alignItems: "center" },
+  teacher: { fontSize: 14, color: "#fff", marginBottom: 10, fontWeight: "500" },
+  dateNavigation: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    marginVertical: 8,
+  },
+  dateArrow: { padding: 8 },
+  dateDisplay: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#fff",
+    paddingHorizontal: 15,
+    paddingVertical: 8,
+    borderRadius: 20,
+    marginHorizontal: 10,
+    gap: 8,
+  },
+  date: { fontSize: 14, color: "#2E7D32", fontWeight: "600" },
+  statsContainer: {
+    flexDirection: "row",
+    justifyContent: "center",
+    marginTop: 10,
+  },
+  statBox: {
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 20,
+    marginHorizontal: 8,
+    alignItems: "center",
+  },
+  statNumber: { fontSize: 18, fontWeight: "bold", color: "#4CAF50" },
+  statLabel: { fontSize: 13, color: "#4CAF50" },
+  tableContainer: { marginTop: 10 },
+  tableHeaderRow: {
+    flexDirection: "row",
+    backgroundColor: "#E6F3D8",
+    paddingVertical: 10,
+    paddingHorizontal: 15,
+    alignItems: "center",
+  },
+  tableHeaderText: { fontSize: 13, fontWeight: "bold", color: "#333" },
+  editButton: {
+    backgroundColor: "#67BA03",
+    paddingHorizontal: 14,
+    paddingVertical: 5,
+    borderRadius: 8,
+  },
+  editButtonText: { color: "#fff", fontWeight: "bold", fontSize: 12 },
+  tableRow: {
+    flexDirection: "row",
+    backgroundColor: "#fff",
+    marginHorizontal: 15,
+    borderBottomWidth: 1,
+    borderColor: "#EEE",
+    paddingVertical: 10,
+  },
+  tableText: { fontSize: 13, color: "#333" },
+  tableCell: { justifyContent: "center", alignItems: "center" },
+  statusText: { fontSize: 13, fontWeight: "bold" },
+  editButtons: { flexDirection: "row", gap: 8 },
+  statusBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: "#CCC",
+  },
+  unselectedBtn: { backgroundColor: "#fff" },
+  presentSelected: { backgroundColor: "#4CAF50", borderColor: "#4CAF50" },
+  absentSelected: { backgroundColor: "#E53935", borderColor: "#E53935" },
+  btnText: { fontWeight: "bold" },
+  pagination: {
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+    marginVertical: 15,
+    gap: 10,
+  },
+  pageButton: { backgroundColor: "#67BA03", borderRadius: 20, padding: 6 },
+  disabledPage: { backgroundColor: "#BDBDBD" },
+  pageText: { fontSize: 14, color: "#333" },
+  overlayContainer: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    top: 0,
+    justifyContent: "flex-end",
+    backgroundColor: "rgba(0,0,0,0.4)",
+  },
+  overlayContent: {
+    backgroundColor: "#fff",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    padding: 20,
+  },
+  overlayName: { fontSize: 16, fontWeight: "bold", color: "#333" },
+  overlayDate: { fontSize: 13, color: "#777", marginBottom: 10 },
+  excuseHeader: {
+    fontSize: 15,
+    fontWeight: "bold",
+    color: "#333",
+    marginBottom: 8,
+  },
+  excuseIndicator: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    marginRight: 6,
+  },
+  excuseTable: {
+    backgroundColor: "#E8F8E0",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#C8E6C9",
+    marginBottom: 15,
+  },
+  excuseRow: {
+    flexDirection: "row",
+    borderBottomWidth: 1,
+    borderColor: "#C8E6C9",
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+  },
+  excuseLabel: { flex: 1, fontWeight: "bold", fontSize: 13, color: "#333" },
+  excuseValue: { flex: 2, fontSize: 13, color: "#333" },
+  commentInput: {
+    flex: 2,
+    borderWidth: 1,
+    borderColor: "#C8E6C9",
+    borderRadius: 6,
+    padding: 5,
+    backgroundColor: "#fff",
+    fontSize: 13,
+    minHeight: 40,
+  },
+  overlayButtons: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginVertical: 10,
+  },
+  approveBtn: {
+    flex: 1,
+    backgroundColor: "#4CAF50",
+    borderRadius: 30,
+    paddingVertical: 10,
+    alignItems: "center",
+    marginRight: 5,
+  },
+  denyBtn: {
+    flex: 1,
+    backgroundColor: "#E53935",
+    borderRadius: 30,
+    paddingVertical: 10,
+    alignItems: "center",
+    marginLeft: 5,
+  },
+  btnActionText: { color: "#fff", fontWeight: "bold", fontSize: 13 },
+  closeBtn: { alignSelf: "center", marginTop: 8 },
+  closeBtnText: {
+    color: "#67BA03",
+    fontWeight: "bold",
+    fontSize: 15,
+    marginBottom: 20,
+  },
+});

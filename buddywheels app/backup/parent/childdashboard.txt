@@ -1,0 +1,1117 @@
+import { Ionicons } from "@expo/vector-icons";
+import { router } from "expo-router";
+import {
+  collection,
+  doc,
+  getDocs,
+  query,
+  updateDoc,
+  where,
+} from "firebase/firestore";
+import React, { useEffect, useState } from "react";
+import {
+  ActivityIndicator,
+  Alert,
+  Image,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+//@ts-ignore
+import { auth, db } from "../../firebaseConfig";
+
+interface Child {
+  id: string;
+  fullName: string;
+  studentId: string;
+  classGrade?: string;
+  className?: string;
+  ppic?: string;
+  commuteType?: "parent" | "bus" | "self";
+  driverID?: string;
+  selfCommuteType?: string;
+}
+
+export default function ChildDashboard() {
+  const [children, setChildren] = useState<Child[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [showCommuteModal, setShowCommuteModal] = useState(false);
+  const [selectedChild, setSelectedChild] = useState<Child | null>(null);
+  const [searchStudentId, setSearchStudentId] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [commuteType, setCommuteType] = useState<"parent" | "bus" | "self">(
+    "parent"
+  );
+  const [driverID, setDriverID] = useState("");
+  const [selfCommuteType, setSelfCommuteType] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+
+  useEffect(() => {
+    fetchChildren();
+  }, []);
+
+  const fetchChildren = async () => {
+    try {
+      setLoading(true);
+      //@ts-ignore
+      const user = auth.currentUser;
+      if (!user) return;
+
+      const parentQuery = query(
+        collection(db, "Parent"),
+        where("email", "==", user.email)
+      );
+      const parentSnapshot = await getDocs(parentQuery);
+
+      if (parentSnapshot.empty) {
+        console.log("Parent not found");
+        setLoading(false);
+        return;
+      }
+
+      const parentData = parentSnapshot.docs[0].data();
+      const parentId = parentData.id;
+
+      const studentsQuery = query(
+        collection(db, "students"),
+        where("parentID", "==", parentId)
+      );
+      const studentsSnapshot = await getDocs(studentsQuery);
+
+      if (studentsSnapshot.empty) {
+        setChildren([]);
+        setLoading(false);
+        return;
+      }
+
+      const childrenData: Child[] = studentsSnapshot.docs.map((doc) => {
+        const studentData = doc.data();
+        return {
+          id: doc.id,
+          fullName: studentData.name || "Unknown",
+          studentId: studentData.studentID,
+          classGrade: studentData.grade || "N/A",
+          className: studentData.class || "N/A",
+          ppic: studentData.ppic,
+          commuteType: studentData.commuteType || "parent",
+          driverID: studentData.driverID || "",
+          selfCommuteType: studentData.selfCommuteType || "",
+        };
+      });
+
+      setChildren(childrenData);
+    } catch (error) {
+      console.error("Error fetching children:", error);
+      Alert.alert("Error", "Failed to load children");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const searchStudent = async () => {
+    if (!searchStudentId.trim()) {
+      Alert.alert("Error", "Please enter a Student ID");
+      return;
+    }
+
+    try {
+      setSearching(true);
+
+      const studentQuery = query(
+        collection(db, "students"),
+        where("studentID", "==", searchStudentId.trim())
+      );
+      const studentSnapshot = await getDocs(studentQuery);
+
+      if (studentSnapshot.empty) {
+        Alert.alert("Not Found", "No student found with this ID");
+        return;
+      }
+
+      const studentDoc = studentSnapshot.docs[0];
+      const studentData = studentDoc.data();
+
+      if (studentData.parentID) {
+        Alert.alert(
+          "Student Already Taken",
+          "This student is already assigned to another parent. Please contact admin."
+        );
+        return;
+      }
+
+      const alreadyAdded = children.some(
+        (child) => child.studentId === searchStudentId.trim()
+      );
+      if (alreadyAdded) {
+        Alert.alert("Already Added", "This child is already in your list");
+        return;
+      }
+
+      Alert.alert(
+        "Confirm Addition",
+        `Add ${studentData.name} (${studentData.studentID}) to your children list?`,
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Add",
+            onPress: () => addChild(studentDoc.id),
+          },
+        ]
+      );
+    } catch (error) {
+      console.error("Search error:", error);
+      Alert.alert("Error", "Failed to search for student");
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const addChild = async (firestoreDocId: string) => {
+    try {
+      setAdding(true);
+      //@ts-ignore
+      const user = auth.currentUser;
+      if (!user) return;
+
+      const parentQuery = query(
+        collection(db, "Parent"),
+        where("email", "==", user.email)
+      );
+      const parentSnapshot = await getDocs(parentQuery);
+
+      if (parentSnapshot.empty) {
+        Alert.alert("Error", "Parent profile not found");
+        return;
+      }
+
+      const parentData = parentSnapshot.docs[0].data();
+      const parentId = parentData.id;
+
+      await updateDoc(doc(db, "students", firestoreDocId), {
+        parentID: parentId,
+      });
+
+      await fetchChildren();
+
+      setShowAddModal(false);
+      setSearchStudentId("");
+      Alert.alert("Success", "Child added successfully!");
+    } catch (error) {
+      console.error("Add child error:", error);
+      Alert.alert("Error", `Failed to add child: ${error}`);
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const openCommuteModal = (child: Child) => {
+    setSelectedChild(child);
+    setCommuteType(child.commuteType || "parent");
+    setDriverID(child.driverID || "");
+    setSelfCommuteType(child.selfCommuteType || "");
+    setShowCommuteModal(true);
+  };
+
+  const saveCommute = async () => {
+    if (!selectedChild) return;
+
+    if (commuteType === "bus") {
+      if (!driverID.trim()) {
+        Alert.alert("Error", "Please enter a Driver ID");
+        return;
+      }
+
+      try {
+        setSaving(true);
+
+        const driverQuery = query(
+          collection(db, "Driver"),
+          where("id", "==", driverID.trim())
+        );
+        const driverSnapshot = await getDocs(driverQuery);
+
+        if (driverSnapshot.empty) {
+          Alert.alert(
+            "Error",
+            "Driver ID not found. Please check and try again."
+          );
+          setSaving(false);
+          return;
+        }
+
+        const studentQuery = query(
+          collection(db, "students"),
+          where("studentID", "==", selectedChild.studentId)
+        );
+        const studentSnapshot = await getDocs(studentQuery);
+
+        if (!studentSnapshot.empty) {
+          const studentDocId = studentSnapshot.docs[0].id;
+          await updateDoc(doc(db, "students", studentDocId), {
+            commuteType: "bus",
+            driverID: driverID.trim(),
+            selfCommuteType: null, // Clear self commute when bus is selected
+          });
+        }
+
+        await fetchChildren();
+        setShowCommuteModal(false);
+        Alert.alert("Success", "Commute information saved successfully!");
+      } catch (error) {
+        console.error("Save commute error:", error);
+        Alert.alert("Error", "Failed to save commute information");
+      } finally {
+        setSaving(false);
+      }
+    } else if (commuteType === "self") {
+      // NEW: Handle self commute
+      if (!selfCommuteType.trim()) {
+        Alert.alert("Error", "Please enter commute method");
+        return;
+      }
+
+      try {
+        setSaving(true);
+
+        const studentQuery = query(
+          collection(db, "students"),
+          where("studentID", "==", selectedChild.studentId)
+        );
+        const studentSnapshot = await getDocs(studentQuery);
+
+        if (!studentSnapshot.empty) {
+          const studentDocId = studentSnapshot.docs[0].id;
+          await updateDoc(doc(db, "students", studentDocId), {
+            commuteType: "self",
+            selfCommuteType: selfCommuteType.trim(),
+            driverID: null, // Clear driver when self commute is selected
+          });
+        }
+
+        await fetchChildren();
+        setShowCommuteModal(false);
+        Alert.alert("Success", "Commute information saved successfully!");
+      } catch (error) {
+        console.error("Save commute error:", error);
+        Alert.alert("Error", "Failed to save commute information");
+      } finally {
+        setSaving(false);
+      }
+    } else {
+      // Parent commute
+      try {
+        setSaving(true);
+
+        const studentQuery = query(
+          collection(db, "students"),
+          where("studentID", "==", selectedChild.studentId)
+        );
+        const studentSnapshot = await getDocs(studentQuery);
+
+        if (!studentSnapshot.empty) {
+          const studentDocId = studentSnapshot.docs[0].id;
+          await updateDoc(doc(db, "students", studentDocId), {
+            commuteType: "parent",
+            driverID: null,
+            selfCommuteType: null, // Clear self commute when parent is selected
+          });
+        }
+
+        await fetchChildren();
+        setShowCommuteModal(false);
+        Alert.alert("Success", "Commute information saved successfully!");
+      } catch (error) {
+        console.error("Save commute error:", error);
+        Alert.alert("Error", "Failed to save commute information");
+      } finally {
+        setSaving(false);
+      }
+    }
+  };
+
+  const removeChild = async () => {
+    if (!selectedChild) return;
+
+    Alert.alert(
+      "Remove Child",
+      `Are you sure you want to remove ${selectedChild.fullName} from your list?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Remove",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              //@ts-ignore
+              const user = auth.currentUser;
+              if (!user) return;
+
+              const studentQuery = query(
+                collection(db, "students"),
+                where("studentID", "==", selectedChild.studentId)
+              );
+              const studentSnapshot = await getDocs(studentQuery);
+
+              if (studentSnapshot.empty) return;
+
+              const studentDocId = studentSnapshot.docs[0].id;
+
+              await updateDoc(doc(db, "students", studentDocId), {
+                parentID: null,
+                commuteType: null,
+                driverID: null,
+                selfCommuteType: null,
+              });
+
+              await fetchChildren();
+              setShowCommuteModal(false);
+
+              Alert.alert("Success", "Child removed successfully");
+            } catch (error) {
+              console.error("Remove child error:", error);
+              Alert.alert("Error", "Failed to remove child");
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  if (loading) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color="#67BA03" />
+        <Text style={styles.loadingText}>Loading children...</Text>
+      </View>
+    );
+  }
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <View style={styles.header}>
+        <TouchableOpacity
+          onPress={() => router.back()}
+          style={styles.backButton}
+        >
+          <Ionicons name="chevron-back" size={28} color="#fff" />
+        </TouchableOpacity>
+        <Text style={styles.headerText}>Child Dashboard</Text>
+        <View style={{ width: 28 }} />
+      </View>
+
+      <View style={styles.subtitle}>
+        <Text style={styles.subtitleText}>
+          Add children and manage their commute
+        </Text>
+      </View>
+
+      <ScrollView
+        contentContainerStyle={styles.content}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={async () => {
+              setRefreshing(true);
+              await fetchChildren();
+              setRefreshing(false);
+            }}
+            colors={["#67BA03"]}
+          />
+        }
+      >
+        {children.length === 0 ? (
+          <View style={styles.emptyState}>
+            <Ionicons name="people-outline" size={80} color="#ccc" />
+            <Text style={styles.emptyText}>No children added yet</Text>
+            <Text style={styles.emptySubtext}>
+              Tap the + button below to add your first child
+            </Text>
+          </View>
+        ) : (
+          children.map((child) => (
+            <TouchableOpacity
+              key={child.id}
+              style={styles.childCard}
+              onPress={() => openCommuteModal(child)}
+            >
+              <Image
+                source={{
+                  uri:
+                    child.ppic ||
+                    "https://cdn-icons-png.flaticon.com/512/3135/3135715.png",
+                }}
+                style={styles.childImage}
+              />
+
+              <View style={styles.childInfo}>
+                <Text style={styles.childName}>{child.fullName}</Text>
+                <Text style={styles.childID}>ID: {child.studentId}</Text>
+                <View style={styles.childDetailsRow}>
+                  <Text style={styles.childClass}>{child.classGrade} </Text>
+                  <Text style={styles.childClass}>{child.className}</Text>
+                </View>
+                {child.commuteType === "bus" && child.driverID && (
+                  <Text style={styles.commuteInfo}>
+                    🚌 Bus: {child.driverID}
+                  </Text>
+                )}
+                {child.commuteType === "parent" && (
+                  <Text style={styles.commuteInfo}>🚗 Parent</Text>
+                )}
+                {child.commuteType === "self" && child.selfCommuteType && (
+                  <Text style={styles.commuteInfo}>
+                    🚶 Self: {child.selfCommuteType}
+                  </Text>
+                )}
+              </View>
+
+              <TouchableOpacity style={styles.arrowButton}>
+                <Ionicons name="chevron-forward" size={24} color="#666" />
+              </TouchableOpacity>
+            </TouchableOpacity>
+          ))
+        )}
+      </ScrollView>
+
+      <TouchableOpacity
+        style={styles.fab}
+        onPress={() => setShowAddModal(true)}
+      >
+        <Ionicons name="add" size={30} color="#fff" />
+      </TouchableOpacity>
+
+      {/* Add Child Modal with KeyboardAvoidingView */}
+      <Modal
+        visible={showAddModal}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setShowAddModal(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+          style={styles.modalOverlay}
+        >
+          <TouchableOpacity
+            style={styles.modalOverlayTouchable}
+            activeOpacity={1}
+            onPress={() => {
+              setShowAddModal(false);
+              setSearchStudentId("");
+            }}
+          >
+            <TouchableOpacity
+              activeOpacity={1}
+              onPress={(e) => e.stopPropagation()}
+              style={styles.modalContent}
+            >
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Add Child</Text>
+                <TouchableOpacity
+                  onPress={() => {
+                    setShowAddModal(false);
+                    setSearchStudentId("");
+                  }}
+                  style={styles.closeButton}
+                >
+                  <Ionicons name="close" size={24} color="#333" />
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.modalBody}>
+                <Text style={styles.label}>Student ID</Text>
+                <TextInput
+                  style={styles.input}
+                  value={searchStudentId}
+                  onChangeText={setSearchStudentId}
+                  placeholder="Enter student ID (e.g., S001)"
+                  placeholderTextColor="#999"
+                  autoCapitalize="characters"
+                />
+
+                <Text style={styles.helperText}>
+                  Enter your child's student ID to add them to your dashboard
+                </Text>
+              </View>
+
+              <View style={styles.modalFooter}>
+                <TouchableOpacity
+                  style={styles.cancelButton}
+                  onPress={() => {
+                    setShowAddModal(false);
+                    setSearchStudentId("");
+                  }}
+                  disabled={searching || adding}
+                >
+                  <Text style={styles.cancelButtonText}>Cancel</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[
+                    styles.searchButton,
+                    (searching || adding) && styles.searchButtonDisabled,
+                  ]}
+                  onPress={searchStudent}
+                  disabled={searching || adding}
+                >
+                  {searching || adding ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <Text style={styles.searchButtonText}>Search & Add</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </TouchableOpacity>
+          </TouchableOpacity>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* Commute Settings Modal with KeyboardAvoidingView */}
+      <Modal
+        visible={showCommuteModal}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowCommuteModal(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+          style={styles.commuteModalOverlay}
+        >
+          <TouchableOpacity
+            style={styles.commuteModalOverlayTouchable}
+            activeOpacity={1}
+            onPress={() => setShowCommuteModal(false)}
+          >
+            <TouchableOpacity
+              activeOpacity={1}
+              onPress={(e) => e.stopPropagation()}
+              style={styles.commuteModalContent}
+            >
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Commute Settings</Text>
+                <TouchableOpacity
+                  onPress={() => setShowCommuteModal(false)}
+                  style={styles.closeButton}
+                >
+                  <Ionicons name="close" size={24} color="#333" />
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView style={styles.commuteModalBody}>
+                {selectedChild && (
+                  <>
+                    <View style={styles.childInfoSection}>
+                      <Image
+                        source={{
+                          uri:
+                            selectedChild.ppic ||
+                            "https://cdn-icons-png.flaticon.com/512/3135/3135715.png",
+                        }}
+                        style={styles.modalChildImage}
+                      />
+                      <Text style={styles.modalChildName}>
+                        {selectedChild.fullName}
+                      </Text>
+                      <Text style={styles.modalChildClass}>
+                        {selectedChild.classGrade} {selectedChild.className}
+                      </Text>
+                    </View>
+
+                    <Text style={styles.sectionTitle}>
+                      How will {selectedChild.fullName.split(" ")[0]} go to
+                      school?
+                    </Text>
+
+                    <View style={styles.commuteOptions}>
+                      <TouchableOpacity
+                        style={[
+                          styles.commuteOption,
+                          commuteType === "parent" &&
+                            styles.commuteOptionSelected,
+                        ]}
+                        onPress={() => setCommuteType("parent")}
+                      >
+                        <Ionicons
+                          name="car"
+                          size={32}
+                          color={commuteType === "parent" ? "#67BA03" : "#999"}
+                        />
+                        <Text
+                          style={[
+                            styles.commuteOptionText,
+                            commuteType === "parent" &&
+                              styles.commuteOptionTextSelected,
+                          ]}
+                        >
+                          By Parent
+                        </Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[
+                          styles.commuteOption,
+                          commuteType === "bus" && styles.commuteOptionSelected,
+                        ]}
+                        onPress={() => setCommuteType("bus")}
+                      >
+                        <Ionicons
+                          name="bus"
+                          size={32}
+                          color={commuteType === "bus" ? "#67BA03" : "#999"}
+                        />
+                        <Text
+                          style={[
+                            styles.commuteOptionText,
+                            commuteType === "bus" &&
+                              styles.commuteOptionTextSelected,
+                          ]}
+                        >
+                          By Bus
+                        </Text>
+                      </TouchableOpacity>
+
+                      {/* NEW: Self Commute Option */}
+                      <TouchableOpacity
+                        style={[
+                          styles.commuteOption,
+                          commuteType === "self" &&
+                            styles.commuteOptionSelected,
+                        ]}
+                        onPress={() => setCommuteType("self")}
+                      >
+                        <Ionicons
+                          name="walk"
+                          size={32}
+                          color={commuteType === "self" ? "#67BA03" : "#999"}
+                        />
+                        <Text
+                          style={[
+                            styles.commuteOptionText,
+                            commuteType === "self" &&
+                              styles.commuteOptionTextSelected,
+                          ]}
+                        >
+                          Self Commute
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    {commuteType === "bus" && (
+                      <View style={styles.driverSection}>
+                        <Text style={styles.label}>Driver ID *</Text>
+                        <TextInput
+                          style={styles.input}
+                          value={driverID}
+                          onChangeText={setDriverID}
+                          placeholder="Enter driver ID"
+                          placeholderTextColor="#999"
+                        />
+                        <Text style={styles.helperText}>
+                          Enter the ID of the bus driver assigned to this route
+                        </Text>
+                      </View>
+                    )}
+                    {/* NEW: Self Commute Input */}
+                    {commuteType === "self" && (
+                      <View style={styles.driverSection}>
+                        <Text style={styles.label}>Commute Method *</Text>
+                        <TextInput
+                          style={styles.input}
+                          value={selfCommuteType}
+                          onChangeText={setSelfCommuteType}
+                          placeholder="e.g., Walk, Bicycle, Motorcycle, etc."
+                          placeholderTextColor="#999"
+                        />
+                        <Text style={styles.helperText}>
+                          Specify how the student will commute to school
+                        </Text>
+                      </View>
+                    )}
+                  </>
+                )}
+              </ScrollView>
+
+              <View style={styles.commuteModalFooter}>
+                <TouchableOpacity
+                  style={styles.removeButton}
+                  onPress={removeChild}
+                  disabled={saving}
+                >
+                  <Ionicons name="trash-outline" size={20} color="#fff" />
+                  <Text style={styles.removeButtonText}>Remove Child</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[
+                    styles.saveCommuteButton,
+                    saving && styles.saveCommuteButtonDisabled,
+                  ]}
+                  onPress={saveCommute}
+                  disabled={saving}
+                >
+                  {saving ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <Text style={styles.saveCommuteButtonText}>Save</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </TouchableOpacity>
+          </TouchableOpacity>
+        </KeyboardAvoidingView>
+      </Modal>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: "#F5F5F5",
+  },
+  header: {
+    backgroundColor: "#67BA03",
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  backButton: {
+    padding: 4,
+  },
+  headerText: {
+    color: "#fff",
+    fontSize: 20,
+    fontWeight: "bold",
+  },
+  subtitle: {
+    backgroundColor: "#fff",
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: "#E0E0E0",
+  },
+  subtitleText: {
+    fontSize: 14,
+    color: "#666",
+  },
+  content: {
+    padding: 16,
+    paddingBottom: 100,
+  },
+  emptyState: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    paddingVertical: 80,
+  },
+  emptyText: {
+    fontSize: 18,
+    fontWeight: "600",
+    color: "#666",
+    marginTop: 16,
+  },
+  emptySubtext: {
+    fontSize: 14,
+    color: "#999",
+    marginTop: 8,
+    textAlign: "center",
+  },
+  childCard: {
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+    borderWidth: 2,
+    borderColor: "#E0E0E0",
+  },
+  childImage: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: "#f0f0f0",
+  },
+  childInfo: {
+    flex: 1,
+    marginLeft: 16,
+  },
+  childName: {
+    fontSize: 16,
+    fontWeight: "bold",
+    color: "#333",
+  },
+  childID: {
+    fontSize: 14,
+    fontWeight: "condensed",
+    color: "#666",
+  },
+  childClass: {
+    fontSize: 13,
+    color: "#666",
+    marginTop: 4,
+  },
+  childDetailsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 4,
+  },
+  commuteInfo: {
+    fontSize: 12,
+    color: "#67BA03",
+    marginTop: 4,
+    fontWeight: "600",
+  },
+  arrowButton: {
+    padding: 4,
+  },
+  fab: {
+    position: "absolute",
+    bottom: 24,
+    right: 24,
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: "#67BA03",
+    justifyContent: "center",
+    alignItems: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.5)",
+    justifyContent: "flex-end",
+  },
+  modalOverlayTouchable: {
+    flex: 1,
+    justifyContent: "flex-end",
+  },
+  modalContent: {
+    backgroundColor: "#fff",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: "60%",
+  },
+  modalHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: "#f0f0f0",
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#333",
+  },
+  closeButton: {
+    padding: 4,
+  },
+  modalBody: {
+    padding: 20,
+  },
+  label: {
+    fontSize: 14,
+    color: "#333",
+    fontWeight: "600",
+    marginBottom: 8,
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: "#E0E0E0",
+    borderRadius: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 15,
+    fontSize: 14,
+    color: "#333",
+    backgroundColor: "#fff",
+  },
+  helperText: {
+    fontSize: 12,
+    color: "#999",
+    marginTop: 8,
+    fontStyle: "italic",
+  },
+  modalFooter: {
+    flexDirection: "row",
+    padding: 20,
+    borderTopWidth: 1,
+    borderTopColor: "#f0f0f0",
+    gap: 12,
+  },
+  cancelButton: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#E0E0E0",
+    alignItems: "center",
+  },
+  cancelButtonText: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "#333",
+  },
+  searchButton: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 8,
+    backgroundColor: "#67BA03",
+    alignItems: "center",
+  },
+  searchButtonDisabled: {
+    opacity: 0.6,
+  },
+  searchButtonText: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "#fff",
+  },
+  center: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  loadingText: {
+    marginTop: 10,
+    fontSize: 14,
+    color: "#666",
+  },
+  commuteModalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.5)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 20,
+  },
+  commuteModalOverlayTouchable: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    width: "100%",
+  },
+  commuteModalContent: {
+    backgroundColor: "#fff",
+    borderRadius: 20,
+    width: "100%",
+    maxWidth: 500,
+    maxHeight: "80%",
+  },
+  commuteModalBody: {
+    padding: 20,
+  },
+  childInfoSection: {
+    alignItems: "center",
+    marginBottom: 24,
+  },
+  modalChildImage: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: "#f0f0f0",
+    marginBottom: 12,
+  },
+  modalChildName: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#333",
+  },
+  modalChildClass: {
+    fontSize: 14,
+    color: "#666",
+    marginTop: 4,
+  },
+  sectionTitle: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#333",
+    marginBottom: 16,
+  },
+  commuteOptions: {
+    flexDirection: "row",
+    gap: 12,
+    marginBottom: 20,
+  },
+  commuteOption: {
+    flex: 1,
+    borderWidth: 2,
+    borderColor: "#E0E0E0",
+    borderRadius: 12,
+    padding: 20,
+    alignItems: "center",
+    backgroundColor: "#fff",
+  },
+  commuteOptionSelected: {
+    borderColor: "#67BA03",
+    backgroundColor: "#F0F9E8",
+  },
+  commuteOptionText: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#666",
+    marginTop: 8,
+  },
+  commuteOptionTextSelected: {
+    color: "#67BA03",
+  },
+  driverSection: {
+    marginTop: 8,
+  },
+  commuteModalFooter: {
+    flexDirection: "row",
+    padding: 20,
+    borderTopWidth: 1,
+    borderTopColor: "#f0f0f0",
+    gap: 12,
+  },
+  removeButton: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 8,
+    backgroundColor: "#E53935",
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "center",
+    gap: 6,
+  },
+  removeButtonText: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "#fff",
+  },
+  saveCommuteButton: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 8,
+    backgroundColor: "#67BA03",
+    alignItems: "center",
+  },
+  saveCommuteButtonDisabled: {
+    opacity: 0.6,
+  },
+  saveCommuteButtonText: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "#fff",
+  },
+});

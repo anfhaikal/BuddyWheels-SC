@@ -1,0 +1,22 @@
+// Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+import { getAuth } from "firebase/auth";
+
+import { getFirestore } from "firebase/firestore";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyB_rHt5HtQgk7DhXwAtasFxmlkgbaD_G34",
+  authDomain: "buddywheels-2211719.firebaseapp.com",
+  projectId: "buddywheels-2211719",
+  storageBucket: "buddywheels-2211719.firebasestorage.app",
+  messagingSenderId: "126392678797",
+  appId: "1:126392678797:web:52c63c55e01544df4d65c4",
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+export const auth = getAuth(app);
+export const db = getFirestore(app);

@@ -1,0 +1,53 @@
+import { useColorScheme } from "@/hooks/use-color-scheme";
+import {
+  DarkTheme,
+  DefaultTheme,
+  ThemeProvider,
+} from "@react-navigation/native";
+import { Stack } from "expo-router";
+import { StatusBar } from "expo-status-bar";
+import { getAuth, onAuthStateChanged, signOut, type User } from "firebase/auth";
+import { useEffect, useState } from "react";
+import "react-native-reanimated";
+import { app } from "../firebaseConfig";
+
+export default function RootLayout() {
+  const colorScheme = useColorScheme();
+  const auth = getAuth(app);
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let unsub: (() => void) | undefined;
+
+    (async () => {
+      // ✅ Force sign out before listening to auth changes
+      try {
+        await signOut(auth);
+        console.log("✅ Forced sign-out completed");
+      } catch (err) {
+        console.error("Sign-out error:", err);
+      }
+
+      // ✅ Now start listening AFTER sign-out
+      unsub = onAuthStateChanged(auth, (u: User | null) => {
+        console.log("👤 Auth state changed:", u);
+        setUser(u);
+        setLoading(false);
+      });
+    })();
+
+    return () => unsub && unsub();
+  }, []);
+
+  if (loading) return null; // prevent flicker
+
+  return (
+    <ThemeProvider value={colorScheme === "dark" ? DarkTheme : DefaultTheme}>
+      <Stack screenOptions={{ headerShown: false }}>
+        {user ? <Stack.Screen name="(tabs)" /> : <Stack.Screen name="(auth)" />}
+      </Stack>
+      <StatusBar style="auto" />
+    </ThemeProvider>
+  );
+}

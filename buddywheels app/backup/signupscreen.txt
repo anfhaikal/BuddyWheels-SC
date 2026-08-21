@@ -1,0 +1,365 @@
+import { Ionicons } from "@expo/vector-icons";
+import { yupResolver } from "@hookform/resolvers/yup";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
+import {
+  createUserWithEmailAndPassword,
+  deleteUser,
+  signOut,
+} from "firebase/auth";
+import { doc, setDoc } from "firebase/firestore";
+import React, { useCallback, useState } from "react";
+import { Controller, useForm } from "react-hook-form";
+import {
+  ActivityIndicator,
+  Alert,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import DropDownPicker from "react-native-dropdown-picker";
+import { SafeAreaView } from "react-native-safe-area-context";
+
+import * as yup from "yup";
+// @ts-ignore
+import { auth, db } from "../../firebaseConfig";
+
+type FormData = {
+  fullName: string;
+  idNumber: string;
+  email: string;
+  phone: string;
+  password: string;
+  retypePassword: string;
+};
+
+const schema = yup.object().shape({
+  fullName: yup.string().required("Full Name is required"),
+  idNumber: yup.string().required("Identification Number is required"),
+  email: yup.string().email("Invalid email").required("Email is required"),
+  phone: yup.string().required("Phone number is required"),
+  password: yup
+    .string()
+    .min(8, "Password must be at least 8 characters")
+    .matches(/[A-Z]/, "Must include an uppercase letter")
+    .matches(/[0-9]/, "Must include a number")
+    .required("Password is required"),
+  retypePassword: yup
+    .string()
+    .oneOf([yup.ref("password")], "Passwords must match")
+    .required("Please retype your password"),
+});
+
+export default function SignUpDetailsScreen() {
+  const router = useRouter();
+  const { userType } = useLocalSearchParams<{ userType: string }>();
+  const [role, setRole] = useState<string>("");
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const roleOptions =
+    userType === "School" ? ["Teacher", "Guard"] : ["Parent", "Driver"];
+  const [items, setItems] = useState(
+    roleOptions.map((option) => ({ label: option, value: option }))
+  );
+
+  const {
+    control,
+    handleSubmit,
+    formState: { errors },
+    reset,
+  } = useForm<FormData>({
+    resolver: yupResolver(schema),
+  });
+
+  useFocusEffect(
+    useCallback(() => {
+      setRole("");
+      reset();
+    }, [])
+  );
+
+  const onSubmit = async (data: FormData) => {
+    if (!role) {
+      Alert.alert("Error", "Please select a role");
+      return;
+    }
+
+    setLoading(true);
+    let userCredential: any = null;
+
+    try {
+      // ✅ CRITICAL: Set flag BEFORE creating user
+      await AsyncStorage.setItem("isSigningUp", "true");
+
+      // 1️⃣ Create user (this auto signs them in)
+      userCredential = await createUserWithEmailAndPassword(
+        //@ts-ignore
+        auth,
+        data.email,
+        data.password
+      );
+
+      // 2️⃣ Save user data to Firestore
+      await setDoc(doc(db, "users", userCredential.user.uid), {
+        role,
+        userType,
+        fullName: data.fullName,
+        idNumber: data.idNumber,
+        email: data.email,
+        phone: data.phone,
+      });
+
+      // 3️⃣ Sign out
+      // @ts-ignore
+      await signOut(auth);
+
+      // 4️⃣ CRITICAL: Remove flag AFTER signout completes
+      await AsyncStorage.removeItem("isSigningUp");
+
+      // 5️⃣ Navigate to login
+      router.replace("/loginscreen");
+
+      // 6️⃣ Show success alert
+      setTimeout(() => {
+        Alert.alert(
+          "Success",
+          "Account created successfully. Please login to continue."
+        );
+      }, 300);
+    } catch (error: any) {
+      // ✅ CRITICAL: Remove flag on error too
+      await AsyncStorage.removeItem("isSigningUp");
+
+      // Clean up: delete user if Firestore write failed
+      if (userCredential && error.code !== "auth/email-already-in-use") {
+        try {
+          await deleteUser(userCredential.user);
+        } catch (deleteError) {
+          console.error("Failed to delete user:", deleteError);
+        }
+      }
+
+      if (error.code === "auth/email-already-in-use") {
+        Alert.alert("Error", "This email is already registered.");
+      } else if (error.code === "auth/invalid-email") {
+        Alert.alert("Error", "Invalid email address.");
+      } else if (error.code === "auth/weak-password") {
+        Alert.alert("Error", "Password is too weak.");
+      } else {
+        Alert.alert("Error", error.message || "Something went wrong.");
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <SafeAreaView
+        style={[
+          styles.safeArea,
+          { justifyContent: "center", alignItems: "center" },
+        ]}
+      >
+        <Text style={{ marginBottom: 10, fontSize: 16 }}>
+          Creating your account...
+        </Text>
+        <ActivityIndicator size="large" color="#67BA03" />
+        <Text style={{ marginTop: 10, color: "#666" }}>Please wait</Text>
+      </SafeAreaView>
+    );
+  }
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <TouchableOpacity
+        style={styles.iconBack}
+        onPress={() => router.push("/rolescreen")}
+      >
+        <Ionicons name="arrow-back" size={26} color="#000" />
+      </TouchableOpacity>
+
+      <View style={styles.container}>
+        <Text style={styles.title}>
+          Create a new {userType ? userType : ""} account
+        </Text>
+
+        <View style={{ marginBottom: 10, zIndex: 1000 }}>
+          <DropDownPicker
+            open={open}
+            value={role}
+            items={items}
+            setOpen={setOpen}
+            setValue={setRole}
+            setItems={setItems}
+            placeholder="Pick a role"
+            style={styles.pickerContainer}
+            textStyle={{ fontWeight: "bold", color: "#67BA03" }}
+            dropDownContainerStyle={{
+              borderWidth: 2,
+              borderColor: "#ccc",
+              borderRadius: 8,
+              backgroundColor: "#dbdbdbff",
+            }}
+          />
+        </View>
+
+        <Controller
+          control={control}
+          name="fullName"
+          render={({ field: { onChange, value } }) => (
+            <TextInput
+              placeholder="Full Name (e.g., John Doe)"
+              placeholderTextColor="#b9b3b3ff"
+              style={styles.input}
+              onChangeText={onChange}
+              value={value}
+            />
+          )}
+        />
+        {errors.fullName && (
+          <Text style={styles.error}>{errors.fullName.message}</Text>
+        )}
+
+        <Controller
+          control={control}
+          name="idNumber"
+          render={({ field: { onChange, value } }) => (
+            <TextInput
+              placeholder="IC Number (e.g., 900101-12-1234)"
+              placeholderTextColor="#b9b3b3ff"
+              style={styles.input}
+              onChangeText={onChange}
+              value={value}
+            />
+          )}
+        />
+        {errors.idNumber && (
+          <Text style={styles.error}>{errors.idNumber.message}</Text>
+        )}
+
+        <Controller
+          control={control}
+          name="email"
+          render={({ field: { onChange, value } }) => (
+            <TextInput
+              placeholder="Email"
+              placeholderTextColor="#b9b3b3ff"
+              keyboardType="email-address"
+              autoCapitalize="none"
+              style={styles.input}
+              onChangeText={onChange}
+              value={value}
+            />
+          )}
+        />
+        {errors.email && (
+          <Text style={styles.error}>{errors.email.message}</Text>
+        )}
+
+        <Controller
+          control={control}
+          name="phone"
+          render={({ field: { onChange, value } }) => (
+            <TextInput
+              placeholder="Phone Number (e.g., +60123456789)"
+              placeholderTextColor="#b9b3b3ff"
+              keyboardType="phone-pad"
+              style={styles.input}
+              onChangeText={onChange}
+              value={value}
+            />
+          )}
+        />
+        {errors.phone && (
+          <Text style={styles.error}>{errors.phone.message}</Text>
+        )}
+
+        <Controller
+          control={control}
+          name="password"
+          render={({ field: { onChange, value } }) => (
+            <TextInput
+              placeholder="Password"
+              placeholderTextColor="#b9b3b3ff"
+              secureTextEntry
+              style={styles.input}
+              onChangeText={onChange}
+              value={value}
+            />
+          )}
+        />
+        {errors.password && (
+          <Text style={styles.error}>{errors.password.message}</Text>
+        )}
+
+        <Controller
+          control={control}
+          name="retypePassword"
+          render={({ field: { onChange, value } }) => (
+            <TextInput
+              placeholder="Retype Password"
+              placeholderTextColor="#b9b3b3ff"
+              secureTextEntry
+              style={styles.input}
+              onChangeText={onChange}
+              value={value}
+            />
+          )}
+        />
+        {errors.retypePassword && (
+          <Text style={styles.error}>{errors.retypePassword.message}</Text>
+        )}
+
+        <TouchableOpacity
+          style={styles.button}
+          onPress={handleSubmit(onSubmit)}
+        >
+          <Text style={styles.buttonText}>SIGN UP</Text>
+        </TouchableOpacity>
+      </View>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  safeArea: { flex: 1, backgroundColor: "#fff" },
+  pickerContainer: {
+    borderWidth: 2,
+    borderColor: "#ccc",
+    borderRadius: 8,
+    marginBottom: 10,
+    overflow: "hidden",
+    backgroundColor: "#dbdbdbff",
+  },
+  iconBack: {
+    position: "absolute",
+    top: 50,
+    left: 20,
+    zIndex: 10,
+    padding: 8,
+    borderRadius: 50,
+  },
+  container: { flex: 1, padding: 20, marginTop: 60 },
+  title: { fontSize: 20, fontWeight: "bold", marginBottom: 10 },
+  input: {
+    borderWidth: 2,
+    borderColor: "#E0E0E0",
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 10,
+  },
+  error: { color: "red", fontSize: 12, marginBottom: 5 },
+  button: {
+    backgroundColor: "#67BA03",
+    width: "100%",
+    borderRadius: 25,
+    paddingVertical: 16,
+    alignItems: "center",
+    marginTop: 30,
+  },
+  buttonText: { color: "#fff", fontWeight: "bold" },
+});

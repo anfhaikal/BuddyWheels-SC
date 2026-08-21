@@ -1,0 +1,117 @@
+"use client";
+
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { onAuthStateChanged, signOut } from "firebase/auth";
+import { auth } from "@/lib/firebaseConfig";
+import { motion } from "framer-motion";
+import { BookOpen } from "lucide-react"; // icon for the page
+
+export default function ClassPage() {
+  const router = useRouter();
+
+  const grades = [1, 2, 3, 4, 5];
+
+  // ✅ Authentication check
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (!user || user.email !== process.env.NEXT_PUBLIC_ADMIN_EMAIL) {
+        router.push("/");
+      }
+    });
+    return () => unsubscribe();
+  }, [router]);
+
+  // ✅ Logout handler
+  const handleLogout = async () => {
+    await signOut(auth);
+    router.push("/");
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-green-100 via-white to-green-50">
+      {/* Header */}
+      <header className="flex justify-between items-center px-8 py-4 bg-white shadow-md sticky top-0 z-40">
+        <div className="flex items-center space-x-3">
+          <img
+            src="/logo.png"
+            alt="BuddyWheels Logo"
+            className="w-30 h-10"
+            onClick={() => router.push("/dashboard")}
+          />
+          <h1 className="text-xl font-semibold text-gray-700">
+            Class Management
+          </h1>
+        </div>
+        <div className="flex items-center space-x-3">
+          <button
+            onClick={() => router.push("/dashboard")}
+            className="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300 transition text-gray-700"
+          >
+            ⬅ Back to Dashboard
+          </button>
+          <button
+            onClick={handleLogout}
+            className="bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 active:scale-95 transition"
+          >
+            Logout
+          </button>
+        </div>
+      </header>
+
+      {/* Main Section */}
+      <main className="p-10">
+        <motion.div
+          initial={{ opacity: 0, y: 30 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.6 }}
+          className="text-center mb-10"
+        >
+          <div className="flex justify-center mb-4">
+            <BookOpen className="w-12 h-12 text-green-600" />
+          </div>
+          <h2 className="text-3xl font-bold text-green-700">
+            Select a Grade to Manage
+          </h2>
+          <p className="text-gray-600 mt-2">
+            Choose a grade level to view and manage its classes.
+          </p>
+        </motion.div>
+
+        {/* Grade Selection */}
+        <div className="flex flex-wrap justify-center gap-8 max-w-4xl mx-auto">
+          {grades.map((grade, index) => (
+            <motion.button
+              key={grade}
+              onClick={() => router.push(`/dashboard/class/${grade}`)}
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: index * 0.1 }}
+              className={`flex flex-col items-center justify-center bg-white shadow-lg rounded-2xl p-10 border border-gray-100 hover:shadow-xl transition w-56
+        ${index >= 3 ? "mt-0" : ""}  // add spacing for 2nd row
+        ${
+          index === 3 ? "ml-0" : ""
+        } // offset the first button of the 2nd row (Grade 4)
+      `}
+            >
+              <span className="text-3xl font-bold text-green-600 mb-2">
+                Grade {grade}
+              </span>
+              <p className="text-sm text-gray-500"></p>
+            </motion.button>
+          ))}
+        </div>
+
+        {/* Footer */}
+        <footer className="text-center text-gray-500 mt-16">
+          <p>
+            © {new Date().getFullYear()} BuddyWheels Admin Panel. All rights
+            reserved.
+          </p>
+        </footer>
+      </main>
+    </div>
+  );
+}

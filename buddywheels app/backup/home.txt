@@ -1,0 +1,219 @@
+import { Ionicons } from "@expo/vector-icons";
+import { router } from "expo-router";
+import { collection, getDocs, query, where } from "firebase/firestore";
+import { useEffect, useState } from "react";
+import {
+  ActivityIndicator,
+  Alert,
+  ImageBackground,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { db } from "../../firebaseConfig";
+
+type ClassData = {
+  classID: string;
+  grade: number;
+  className: string;
+  teacherName: string;
+  studentCount: number;
+};
+
+export default function HomeScreen() {
+  const [classes, setClasses] = useState<ClassData[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetchClasses();
+  }, []);
+
+  const fetchClasses = async () => {
+    try {
+      setLoading(true);
+
+      // 1️⃣ Fetch all classes
+      const classesSnapshot = await getDocs(collection(db, "classes"));
+      const classesData: ClassData[] = [];
+
+      for (const classDoc of classesSnapshot.docs) {
+        const classData = classDoc.data();
+
+        // 2️⃣ Fetch teacher name for this class
+        let teacherName = "No teacher assigned";
+
+        if (classData.teacherID) {
+          const teacherQuery = query(
+            collection(db, "Teacher"),
+            where("id", "==", classData.teacherID)
+          );
+          const teacherSnapshot = await getDocs(teacherQuery);
+
+          if (!teacherSnapshot.empty) {
+            const teacherData = teacherSnapshot.docs[0].data();
+            teacherName = teacherData.fullName || "Unknown Teacher";
+          }
+        }
+
+        // 3️⃣ Combine data
+        classesData.push({
+          classID: classData.classID,
+          grade: classData.grade,
+          className: classData.className,
+          teacherName: teacherName,
+          studentCount: classData.studentCount || 0,
+        });
+      }
+
+      setClasses(classesData);
+    } catch (error) {
+      console.error("Error fetching classes:", error);
+      Alert.alert("Error", "Failed to load classes");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <SafeAreaView style={styles.container}>
+      {/* Header */}
+      <View style={styles.header}>
+        <Text style={styles.headerText}>My Classes</Text>
+      </View>
+
+      {/* Content */}
+      <ScrollView contentContainerStyle={styles.content}>
+        {loading ? (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#67BA03" />
+            <Text style={styles.loadingText}>Loading classes...</Text>
+          </View>
+        ) : classes.length === 0 ? (
+          <View style={styles.emptyContainer}>
+            <Ionicons name="school-outline" size={64} color="#CCC" />
+            <Text style={styles.emptyText}>No classes found</Text>
+          </View>
+        ) : (
+          classes.map((classItem) => (
+            <TouchableOpacity
+              key={classItem.classID}
+              style={styles.cardWrapper}
+              activeOpacity={0.9}
+              onPress={() => router.push("/class")}
+            >
+              <ImageBackground
+                source={require("C:/Users/haika/Documents/IIUM DEGREE/BuddyWheels/buddywheels/assets/images/card.png")}
+                style={styles.classCard}
+                imageStyle={styles.cardImage}
+              >
+                <View style={styles.classInfo}>
+                  <Text style={styles.classTitle}>
+                    {classItem.grade} {classItem.className}
+                  </Text>
+                  <Text style={styles.classSubtitle}>
+                    Class Teacher: {classItem.teacherName}
+                  </Text>
+                </View>
+
+                <View style={styles.studentInfo}>
+                  <Text style={styles.studentLabel}>STUDENTS</Text>
+                  <Text style={styles.studentCount}>
+                    {classItem.studentCount}
+                  </Text>
+                  <Ionicons name="chevron-forward" size={18} color="#fff" />
+                </View>
+              </ImageBackground>
+            </TouchableOpacity>
+          ))
+        )}
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: "#F5F5F5",
+  },
+  header: {
+    backgroundColor: "#67BA03",
+    paddingVertical: 22,
+    paddingHorizontal: 20,
+    alignItems: "center",
+  },
+  headerText: {
+    color: "#fff",
+    fontSize: 20,
+    fontWeight: "bold",
+  },
+  content: {
+    padding: 16,
+  },
+  loadingContainer: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 50,
+  },
+  loadingText: {
+    marginTop: 10,
+    color: "#666",
+    fontSize: 14,
+  },
+  emptyContainer: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 50,
+  },
+  emptyText: {
+    marginTop: 16,
+    color: "#999",
+    fontSize: 16,
+  },
+  cardWrapper: {
+    borderRadius: 14,
+    overflow: "hidden",
+    marginBottom: 16,
+  },
+  classCard: {
+    borderRadius: 14,
+    padding: 30,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    overflow: "hidden",
+  },
+  cardImage: {
+    borderRadius: 14,
+  },
+  classInfo: {
+    flex: 1,
+  },
+  classTitle: {
+    color: "#fff",
+    fontSize: 18,
+    fontWeight: "bold",
+  },
+  classSubtitle: {
+    color: "#fff",
+    marginTop: 4,
+    fontSize: 13,
+  },
+  studentInfo: {
+    alignItems: "center",
+  },
+  studentLabel: {
+    color: "#fff",
+    fontSize: 12,
+    letterSpacing: 1,
+  },
+  studentCount: {
+    color: "#fff",
+    fontSize: 22,
+    fontWeight: "bold",
+    marginVertical: 2,
+  },
+});

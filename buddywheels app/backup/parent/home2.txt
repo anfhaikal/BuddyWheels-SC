@@ -1,0 +1,986 @@
+import { Ionicons } from "@expo/vector-icons";
+import { LinearGradient } from "expo-linear-gradient";
+import { router } from "expo-router";
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  onSnapshot,
+  query,
+  where,
+} from "firebase/firestore";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import {
+  ActivityIndicator,
+  Animated,
+  Image,
+  RefreshControl,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
+// @ts-ignore
+import { auth, db } from "../../firebaseConfig";
+
+interface ChildAttendance {
+  studentID: string;
+  studentName: string;
+  present: number;
+  absent: number;
+  totalWorkdays: number;
+  attendanceRate: number;
+}
+
+export default function ParentHome() {
+  const [userData, setUserData] = useState<any>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [childrenAttendance, setChildrenAttendance] = useState<
+    ChildAttendance[]
+  >([]);
+  const [loadingStats, setLoadingStats] = useState(true);
+
+  const scaleAnim1 = useRef(new Animated.Value(1)).current;
+  const scaleAnim2 = useRef(new Animated.Value(1)).current;
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 800,
+      useNativeDriver: true,
+    }).start();
+  }, []);
+
+  const fetchUserData = useCallback(async () => {
+    try {
+      // @ts-ignore
+      const user = auth.currentUser;
+      if (!user) return;
+
+      const userRef = doc(db, "users", user.uid);
+      const docSnap = await getDoc(userRef);
+
+      if (docSnap.exists()) {
+        setUserData(docSnap.data());
+      }
+    } catch (error) {
+      console.error("Error fetching user data:", error);
+    }
+  }, []);
+
+  // Calculate workdays from start of month until today
+  const calculateWorkdays = (startDate: Date, endDate: Date): number => {
+    let workdays = 0;
+    const current = new Date(startDate);
+
+    while (current <= endDate) {
+      const day = current.getDay();
+      // Count only weekdays (Monday=1 to Friday=5)
+      if (day !== 0 && day !== 6) {
+        workdays++;
+      }
+      current.setDate(current.getDate() + 1);
+    }
+
+    return workdays;
+  };
+
+  const fetchAttendanceStats = useCallback(async () => {
+    try {
+      setLoadingStats(true);
+      // @ts-ignore
+      const user = auth.currentUser;
+      if (!user) return;
+
+      // Get current user's parent ID
+      const userRef = doc(db, "users", user.uid);
+      const userDoc = await getDoc(userRef);
+      if (!userDoc.exists()) return;
+
+      const parentID = userDoc.data().id;
+
+      // Get all children of this parent
+      const studentsQuery = query(
+        collection(db, "students"),
+        where("parentID", "==", parentID)
+      );
+      const studentsSnapshot = await getDocs(studentsQuery);
+
+      if (studentsSnapshot.empty) {
+        setLoadingStats(false);
+        return;
+      }
+
+      // Get date range from start of month to today
+      const today = new Date();
+      const startDate = new Date(today.getFullYear(), today.getMonth(), 1);
+
+      const formatDate = (date: Date) => {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, "0");
+        const day = String(date.getDate()).padStart(2, "0");
+        return `${year}-${month}-${day}`;
+      };
+
+      const startStr = formatDate(startDate);
+      const todayStr = formatDate(today);
+
+      // Calculate total workdays from start of month to today
+      const totalWorkdays = calculateWorkdays(startDate, today);
+
+      // Process each child individually
+      const childrenData: ChildAttendance[] = [];
+
+      for (const studentDoc of studentsSnapshot.docs) {
+        const studentData = studentDoc.data();
+        const studentID = studentData.studentID;
+        const studentName = studentData.fullName || "Unknown";
+
+        // Fetch attendance records for this specific child
+        const attendanceQuery = query(
+          collection(db, "attendance"),
+          where("studentID", "==", studentID),
+          where("date", ">=", startStr),
+          where("date", "<=", todayStr)
+        );
+
+        const attendanceSnapshot = await getDocs(attendanceQuery);
+
+        // Create a Set of dates with present status (status === 1)
+        const presentDates = new Set<string>();
+
+        attendanceSnapshot.forEach((doc) => {
+          const data = doc.data();
+          const date = new Date(data.date);
+          const day = date.getDay();
+
+          // Only count weekdays
+          if (day !== 0 && day !== 6) {
+            if (data.status === 1) {
+              presentDates.add(data.date);
+            }
+          }
+        });
+
+        // Present = days with status 1
+        const presentCount = presentDates.size;
+        // Absent = total workdays - present days
+        const absentCount = totalWorkdays - presentCount;
+
+        const rate =
+          totalWorkdays > 0 ? (presentCount / totalWorkdays) * 100 : 0;
+
+        childrenData.push({
+          studentID,
+          studentName,
+          present: presentCount,
+          absent: absentCount,
+          totalWorkdays,
+          attendanceRate: Math.round(rate),
+        });
+      }
+
+      setChildrenAttendance(childrenData);
+      setLoadingStats(false);
+    } catch (error) {
+      console.error("Error fetching attendance stats:", error);
+      setLoadingStats(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    // @ts-ignore
+    const user = auth.currentUser;
+    if (!user) return;
+
+    const userRef = doc(db, "users", user.uid);
+    const unsubscribe = onSnapshot(userRef, (docSnap) => {
+      if (docSnap.exists()) {
+        setUserData(docSnap.data());
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    fetchAttendanceStats();
+  }, [fetchAttendanceStats]);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await fetchUserData();
+    await fetchAttendanceStats();
+    setTimeout(() => setRefreshing(false), 800);
+  }, [fetchUserData, fetchAttendanceStats]);
+
+  const handlePressIn = (anim: Animated.Value) => {
+    Animated.spring(anim, {
+      toValue: 0.95,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const handlePressOut = (anim: Animated.Value) => {
+    Animated.spring(anim, {
+      toValue: 1,
+      friction: 3,
+      tension: 40,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  // Calculate overall stats for the quick stats cards
+  const overallStats = childrenAttendance.reduce(
+    (acc, child) => ({
+      totalPresent: acc.totalPresent + child.present,
+      totalAbsent: acc.totalAbsent + child.absent,
+      totalDays: acc.totalDays + child.totalWorkdays,
+    }),
+    { totalPresent: 0, totalAbsent: 0, totalDays: 0 }
+  );
+
+  const overallRate =
+    overallStats.totalDays > 0
+      ? Math.round((overallStats.totalPresent / overallStats.totalDays) * 100)
+      : 0;
+
+  return (
+    <>
+      <StatusBar
+        backgroundColor="#67BA03"
+        barStyle="light-content"
+        translucent={false}
+      />
+      <View style={styles.container}>
+        <LinearGradient
+          colors={["#67BA03", "#5AA002", "#4D8902"]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.header}
+        >
+          {/* Decorative circles */}
+          <View style={styles.circleDecor1} />
+          <View style={styles.circleDecor2} />
+          <View style={styles.circleDecor3} />
+
+          <View style={styles.headerContent}>
+            {/* Avatar with glow effect */}
+            <View style={styles.avatarContainer}>
+              <View style={styles.avatarGlow} />
+              <Image
+                source={{
+                  uri:
+                    userData?.ppic ||
+                    "https://cdn-icons-png.flaticon.com/512/3135/3135715.png",
+                }}
+                style={styles.avatar}
+              />
+              <View style={styles.onlineIndicator} />
+            </View>
+
+            {/* Text content */}
+            <View style={styles.headerTextContainer}>
+              <Text style={styles.headerSubtitle}>Welcome back,</Text>
+              <Text style={styles.headerTitle}>
+                {userData?.fullName || "Parent"} 👋
+              </Text>
+              <View style={styles.roleBadge}>
+                <Ionicons name="shield-checkmark" size={12} color="#67BA03" />
+                <Text style={styles.roleText}>Parent</Text>
+              </View>
+            </View>
+
+            {/* Notification with badge */}
+            <TouchableOpacity
+              activeOpacity={0.7}
+              onPress={() => router.push("/(parent)/notification")}
+              style={styles.notificationButton}
+            >
+              <View style={styles.notificationIconContainer}>
+                <Ionicons name="notifications" size={24} color="#67BA03" />
+                <View style={styles.notificationBadge}>
+                  <Text style={styles.notificationBadgeText}>3</Text>
+                </View>
+              </View>
+            </TouchableOpacity>
+          </View>
+        </LinearGradient>
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor="#67BA03"
+              colors={["#67BA03"]}
+            />
+          }
+        >
+          {/* Welcome Card with gradient border */}
+          <Animated.View style={[styles.welcomeCard, { opacity: fadeAnim }]}>
+            <View style={styles.welcomeIconContainer}>
+              <LinearGradient
+                colors={["#67BA03", "#5AA002"]}
+                style={styles.welcomeIconBg}
+              >
+                <Ionicons name="home" size={24} color="#fff" />
+              </LinearGradient>
+            </View>
+            <Text style={styles.welcomeTitle}>Parent Dashboard</Text>
+            <Text style={styles.welcomeText}>
+              Manage, monitor, and stay updated with your child's daily commute
+              and attendance effortlessly.
+            </Text>
+          </Animated.View>
+
+          {/* Monthly Attendance Analytics Card - For Each Child */}
+          <TouchableOpacity
+            activeOpacity={0.8}
+            onPress={() => router.push("/childattendance")}
+            style={{ marginHorizontal: 20, marginTop: 16 }}
+          >
+            <Animated.View
+              style={[styles.analyticsCard, { opacity: fadeAnim }]}
+            >
+              <View style={styles.analyticsHeader}>
+                <View style={styles.analyticsIconBg}>
+                  <Ionicons name="bar-chart" size={24} color="#2196F3" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.analyticsTitle}>Monthly Attendance</Text>
+                  <Text style={styles.analyticsSubtitle}>
+                    {new Date().toLocaleDateString("en-MY", {
+                      month: "long",
+                      year: "numeric",
+                    })}{" "}
+                    • As of{" "}
+                    {new Date().toLocaleDateString("en-MY", {
+                      day: "numeric",
+                      month: "short",
+                    })}
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={20} color="#999" />
+              </View>
+
+              {loadingStats ? (
+                <View style={styles.analyticsLoading}>
+                  <ActivityIndicator size="small" color="#2196F3" />
+                </View>
+              ) : (
+                <>
+                  {/* Individual Child Cards */}
+                  {childrenAttendance.map((child, index) => (
+                    <View key={child.studentID}>
+                      <View style={styles.childCard}>
+                        <View style={styles.childHeader}>
+                          <View style={styles.childIconBg}>
+                            <Ionicons name="person" size={20} color="#2196F3" />
+                          </View>
+                          <Text style={styles.childName}>
+                            {child.studentName}
+                          </Text>
+                        </View>
+
+                        <View style={styles.childStats}>
+                          <View style={styles.childStatItem}>
+                            <Text style={styles.childStatValue}>
+                              {child.present}/{child.totalWorkdays}
+                            </Text>
+                            <Text style={styles.childStatLabel}>Present</Text>
+                          </View>
+
+                          <View style={styles.childStatDivider} />
+
+                          <View style={styles.childStatItem}>
+                            <Text
+                              style={[
+                                styles.childStatValue,
+                                { color: "#E53935" },
+                              ]}
+                            >
+                              {child.absent}/{child.totalWorkdays}
+                            </Text>
+                            <Text style={styles.childStatLabel}>Absent</Text>
+                          </View>
+
+                          <View style={styles.childStatDivider} />
+
+                          <View style={styles.childStatItem}>
+                            <Text
+                              style={[
+                                styles.childStatValue,
+                                { color: "#FF9800" },
+                              ]}
+                            >
+                              {child.attendanceRate}%
+                            </Text>
+                            <Text style={styles.childStatLabel}>Rate</Text>
+                          </View>
+                        </View>
+                      </View>
+
+                      {index < childrenAttendance.length - 1 && (
+                        <View style={styles.childDivider} />
+                      )}
+                    </View>
+                  ))}
+
+                  {childrenAttendance.length === 0 && (
+                    <View style={styles.noDataContainer}>
+                      <Ionicons name="school-outline" size={48} color="#ccc" />
+                      <Text style={styles.noDataText}>
+                        No children registered
+                      </Text>
+                    </View>
+                  )}
+
+                  <View style={styles.analyticsFooter}>
+                    <Text style={styles.analyticsFooterText}>
+                      Tap to view detailed analytics
+                    </Text>
+                  </View>
+                </>
+              )}
+            </Animated.View>
+          </TouchableOpacity>
+
+          {/* Quick Stats Cards */}
+          <View style={styles.statsContainer}>
+            <View style={styles.statCard}>
+              <View style={[styles.statIconBg, { backgroundColor: "#E8F5E9" }]}>
+                <Ionicons name="people" size={20} color="#67BA03" />
+              </View>
+              <Text style={styles.statValue}>{childrenAttendance.length}</Text>
+              <Text style={styles.statLabel}>Children</Text>
+            </View>
+            <View style={styles.statCard}>
+              <View style={[styles.statIconBg, { backgroundColor: "#FFF3E0" }]}>
+                <Ionicons name="calendar" size={20} color="#FF9800" />
+              </View>
+              <Text style={styles.statValue}>{overallRate}%</Text>
+              <Text style={styles.statLabel}>Attendance</Text>
+            </View>
+            <View style={styles.statCard}>
+              <View style={[styles.statIconBg, { backgroundColor: "#E3F2FD" }]}>
+                <Ionicons name="checkmark-circle" size={20} color="#2196F3" />
+              </View>
+              <Text style={styles.statValue}>{overallStats.totalPresent}</Text>
+              <Text style={styles.statLabel}>Present</Text>
+            </View>
+          </View>
+
+          {/* Main Action Cards */}
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Quick Actions</Text>
+            <View style={styles.sectionLine} />
+          </View>
+
+          <View style={styles.buttonContainer}>
+            {/* Child Dashboard Card */}
+            <Animated.View style={{ transform: [{ scale: scaleAnim1 }] }}>
+              <TouchableOpacity
+                activeOpacity={0.9}
+                onPressIn={() => handlePressIn(scaleAnim1)}
+                onPressOut={() => handlePressOut(scaleAnim1)}
+                onPress={() => router.push("/childdashboard")}
+                style={styles.actionCard}
+              >
+                <LinearGradient
+                  colors={["#67BA03", "#5AA002"]}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.actionCardGradient}
+                >
+                  <View style={styles.actionCardPattern} />
+                  <View style={styles.actionCardContent}>
+                    <View style={styles.actionIconContainer}>
+                      <View style={styles.actionIconBg}>
+                        <Ionicons
+                          name="people-circle"
+                          size={32}
+                          color="#67BA03"
+                        />
+                      </View>
+                    </View>
+                    <View style={styles.actionTextContainer}>
+                      <Text style={styles.actionTitle}>Child Dashboard</Text>
+                      <Text style={styles.actionSubtitle}>
+                        Add and manage your children's rides
+                      </Text>
+                    </View>
+                    <View style={styles.actionArrow}>
+                      <Ionicons name="arrow-forward" size={20} color="#fff" />
+                    </View>
+                  </View>
+                </LinearGradient>
+              </TouchableOpacity>
+            </Animated.View>
+
+            {/* Child Attendance Card */}
+            <Animated.View style={{ transform: [{ scale: scaleAnim2 }] }}>
+              <TouchableOpacity
+                activeOpacity={0.9}
+                onPressIn={() => handlePressIn(scaleAnim2)}
+                onPressOut={() => handlePressOut(scaleAnim2)}
+                onPress={() => router.push("/childattendance")}
+                style={styles.actionCard}
+              >
+                <LinearGradient
+                  colors={["#2196F3", "#1976D2"]}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.actionCardGradient}
+                >
+                  <View style={styles.actionCardPattern} />
+                  <View style={styles.actionCardContent}>
+                    <View style={styles.actionIconContainer}>
+                      <View style={styles.actionIconBg}>
+                        <Ionicons name="calendar" size={32} color="#2196F3" />
+                      </View>
+                    </View>
+                    <View style={styles.actionTextContainer}>
+                      <Text style={styles.actionTitle}>Child Attendance</Text>
+                      <Text style={styles.actionSubtitle}>
+                        Track attendance records and excuses
+                      </Text>
+                    </View>
+                    <View style={styles.actionArrow}>
+                      <Ionicons name="arrow-forward" size={20} color="#fff" />
+                    </View>
+                  </View>
+                </LinearGradient>
+              </TouchableOpacity>
+            </Animated.View>
+          </View>
+
+          <View style={{ height: 30 }} />
+        </ScrollView>
+      </View>
+    </>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: "#F5F7FA",
+  },
+  header: {
+    borderBottomLeftRadius: 30,
+    borderBottomRightRadius: 30,
+    paddingVertical: 30,
+    paddingHorizontal: 20,
+    paddingTop: 50,
+    overflow: "hidden",
+    elevation: 8,
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    height: 180,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  circleDecor1: {
+    position: "absolute",
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    backgroundColor: "rgba(255, 255, 255, 0.1)",
+    top: -50,
+    right: -30,
+  },
+  circleDecor2: {
+    position: "absolute",
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: "rgba(255, 255, 255, 0.08)",
+    bottom: -20,
+    left: -20,
+  },
+  circleDecor3: {
+    position: "absolute",
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: "rgba(255, 255, 255, 0.06)",
+    top: 40,
+    left: "50%",
+  },
+  headerContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    zIndex: 1,
+    marginTop: 20,
+  },
+  avatarContainer: {
+    position: "relative",
+  },
+  avatarGlow: {
+    position: "absolute",
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    backgroundColor: "rgba(255, 255, 255, 0.3)",
+    top: -5,
+    left: -5,
+  },
+  avatar: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    borderWidth: 3,
+    borderColor: "#fff",
+    backgroundColor: "#E8F5E9",
+  },
+  onlineIndicator: {
+    position: "absolute",
+    bottom: 2,
+    right: 2,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: "#4CAF50",
+    borderWidth: 2,
+    borderColor: "#fff",
+  },
+  headerTextContainer: {
+    flex: 1,
+    marginLeft: 15,
+  },
+  headerSubtitle: {
+    color: "rgba(255, 255, 255, 0.9)",
+    fontSize: 13,
+    fontWeight: "500",
+  },
+  headerTitle: {
+    color: "#fff",
+    fontSize: 22,
+    fontWeight: "bold",
+    marginTop: 2,
+  },
+  roleBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(255, 255, 255, 0.95)",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginTop: 6,
+    alignSelf: "flex-start",
+    gap: 4,
+  },
+  roleText: {
+    fontSize: 11,
+    color: "#67BA03",
+    fontWeight: "700",
+  },
+  notificationButton: {
+    marginLeft: 10,
+  },
+  notificationIconContainer: {
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    padding: 10,
+    position: "relative",
+    elevation: 3,
+    shadowColor: "#000",
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  notificationBadge: {
+    position: "absolute",
+    top: -4,
+    right: -4,
+    backgroundColor: "#E53935",
+    borderRadius: 10,
+    minWidth: 20,
+    height: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 2,
+    borderColor: "#fff",
+  },
+  notificationBadgeText: {
+    color: "#fff",
+    fontSize: 11,
+    fontWeight: "bold",
+  },
+  welcomeCard: {
+    backgroundColor: "#fff",
+    marginHorizontal: 20,
+    marginTop: 15,
+    borderRadius: 20,
+    padding: 20,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    borderWidth: 1,
+    borderColor: "rgba(103, 186, 3, 0.1)",
+  },
+  welcomeIconContainer: {
+    alignSelf: "flex-start",
+    marginBottom: 12,
+  },
+  welcomeIconBg: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  welcomeTitle: {
+    fontSize: 20,
+    fontWeight: "bold",
+    color: "#333",
+    marginBottom: 8,
+  },
+  welcomeText: {
+    fontSize: 14,
+    color: "#666",
+    lineHeight: 22,
+  },
+  analyticsCard: {
+    backgroundColor: "#fff",
+    borderRadius: 20,
+    padding: 20,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    borderWidth: 1,
+    borderColor: "rgba(33, 150, 243, 0.1)",
+  },
+  analyticsHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 16,
+    gap: 12,
+  },
+  analyticsIconBg: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    backgroundColor: "#E3F2FD",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  analyticsTitle: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: "#333",
+  },
+  analyticsSubtitle: {
+    fontSize: 11,
+    color: "#999",
+    marginTop: 2,
+  },
+  analyticsLoading: {
+    paddingVertical: 30,
+    alignItems: "center",
+  },
+  childCard: {
+    backgroundColor: "#F8F9FA",
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+  },
+  childHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 12,
+    gap: 10,
+  },
+  childIconBg: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    backgroundColor: "#E3F2FD",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  childName: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "#333",
+  },
+  childStats: {
+    flexDirection: "row",
+    justifyContent: "space-around",
+    alignItems: "center",
+  },
+  childStatItem: {
+    alignItems: "center",
+    flex: 1,
+  },
+  childStatValue: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#4CAF50",
+    marginBottom: 4,
+  },
+  childStatLabel: {
+    fontSize: 11,
+    color: "#999",
+  },
+  childStatDivider: {
+    width: 1,
+    height: 30,
+    backgroundColor: "#E0E0E0",
+  },
+  childDivider: {
+    height: 1,
+    backgroundColor: "#F0F0F0",
+    marginVertical: 8,
+  },
+  noDataContainer: {
+    alignItems: "center",
+    paddingVertical: 40,
+  },
+  noDataText: {
+    fontSize: 14,
+    color: "#999",
+    marginTop: 12,
+  },
+  analyticsFooter: {
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: "#F0F0F0",
+    alignItems: "center",
+  },
+  analyticsFooterText: {
+    fontSize: 12,
+    color: "#2196F3",
+    fontWeight: "500",
+  },
+  statsContainer: {
+    flexDirection: "row",
+    marginHorizontal: 20,
+    marginTop: 20,
+    gap: 12,
+  },
+  statCard: {
+    flex: 1,
+    backgroundColor: "#fff",
+    borderRadius: 16,
+    padding: 16,
+    alignItems: "center",
+    elevation: 2,
+    shadowColor: "#000",
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+  },
+  statIconBg: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 8,
+  },
+  statValue: {
+    fontSize: 20,
+    fontWeight: "bold",
+    color: "#333",
+    marginBottom: 4,
+  },
+  statLabel: {
+    fontSize: 11,
+    color: "#999",
+    fontWeight: "500",
+  },
+  sectionHeader: {
+    marginHorizontal: 20,
+    marginTop: 30,
+    marginBottom: 16,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#333",
+    marginBottom: 8,
+  },
+  sectionLine: {
+    width: 40,
+    height: 3,
+    backgroundColor: "#67BA03",
+    borderRadius: 2,
+  },
+  buttonContainer: {
+    marginHorizontal: 20,
+    gap: 16,
+  },
+  actionCard: {
+    borderRadius: 20,
+    overflow: "hidden",
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  actionCardGradient: {
+    borderRadius: 20,
+    overflow: "hidden",
+  },
+  actionCardPattern: {
+    position: "absolute",
+    right: -30,
+    top: -30,
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: "rgba(255, 255, 255, 0.1)",
+  },
+  actionCardContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 20,
+  },
+  actionIconContainer: {
+    marginRight: 16,
+  },
+  actionIconBg: {
+    width: 56,
+    height: 56,
+    borderRadius: 16,
+    backgroundColor: "#fff",
+    alignItems: "center",
+    justifyContent: "center",
+    elevation: 2,
+    shadowColor: "#000",
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  actionTextContainer: {
+    flex: 1,
+  },
+  actionTitle: {
+    fontSize: 17,
+    fontWeight: "bold",
+    color: "#fff",
+    marginBottom: 4,
+  },
+  actionSubtitle: {
+    fontSize: 13,
+    color: "rgba(255, 255, 255, 0.9)",
+    lineHeight: 18,
+  },
+  actionArrow: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "rgba(255, 255, 255, 0.2)",
+    alignItems: "center",
+    justifyContent: "center",
+    marginLeft: 12,
+  },
+});

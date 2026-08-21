@@ -1,0 +1,22 @@
+﻿/.pytest_cache/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+*.pickle
+/.mypy_cache/
+
+# Local data and captures
+known_faces/*
+!known_faces/.gitkeep
+known_faces/encodings.pickle
+enrollments/
+attendance.csv
+probes/
+archive/
+
+# Environment files
+.env
+.DS_Store

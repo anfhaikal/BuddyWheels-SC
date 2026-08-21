@@ -1,0 +1,1882 @@
+import { Ionicons } from "@expo/vector-icons";
+import { useFocusEffect } from "@react-navigation/native";
+import { LinearGradient } from "expo-linear-gradient";
+import {
+  addDoc,
+  collection,
+  doc,
+  DocumentData,
+  getDoc,
+  getDocs,
+  onSnapshot,
+  query,
+  setDoc,
+  Timestamp,
+  updateDoc,
+  where,
+} from "firebase/firestore";
+import React, { useEffect, useRef, useState } from "react";
+import {
+  ActivityIndicator,
+  Animated,
+  Image,
+  Modal,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
+// @ts-ignore
+import { auth, db } from "../../firebaseConfig";
+
+interface Student {
+  id: string;
+  name: string;
+  studentID: string;
+  ppic?: string;
+  classID?: string;
+  parentID?: string;
+}
+
+interface PickupData {
+  driverID: string;
+  plateNumber: string;
+  date: string;
+  timeSlot: string;
+  status: "No status" | "On the way" | "Arrived" | "Dismissed";
+  studentIDs: string[];
+  students: Student[];
+  droppedOffStudents?: string[];
+}
+
+interface DriverSettings {
+  defaultPlateNumber?: string;
+  defaultTimeSlot?: string;
+}
+
+const TIME_SLOTS = ["5:00-5:30", "5:30-6:00", "6:00-6:30"];
+
+export default function PickupScreen() {
+  const [plateNumbers, setPlateNumbers] = useState<string[]>([]);
+  const [selectedPlate, setSelectedPlate] = useState<string>("");
+  const [selectedTimeSlot, setSelectedTimeSlot] = useState<string>("");
+  const [allStudents, setAllStudents] = useState<Student[]>([]);
+  const [presentStudents, setPresentStudents] = useState<Student[]>([]);
+  const [pickupData, setPickupData] = useState<PickupData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [currentDate, setCurrentDate] = useState(new Date());
+  const [driverSettings, setDriverSettings] = useState<DriverSettings>({});
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [tempSettings, setTempSettings] = useState<DriverSettings>({});
+  const [showDropOffModal, setShowDropOffModal] = useState(false);
+
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const slideAnim = useRef(new Animated.Value(50)).current;
+  const scrollViewRef = useRef<ScrollView>(null);
+
+  useFocusEffect(
+    React.useCallback(() => {
+      scrollViewRef.current?.scrollTo({ y: 0, animated: false });
+
+      const now = new Date();
+      setCurrentDate(now);
+      fetchData();
+
+      fadeAnim.setValue(0);
+      slideAnim.setValue(50);
+      Animated.parallel([
+        Animated.timing(fadeAnim, {
+          toValue: 1,
+          duration: 600,
+          useNativeDriver: true,
+        }),
+        Animated.timing(slideAnim, {
+          toValue: 0,
+          duration: 600,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    }, [])
+  );
+
+  const fetchParentOptIns = async (dateStr: string): Promise<Set<string>> => {
+    try {
+      const pickupsQuery = query(
+        collection(db, "pickups"),
+        where("date", "==", dateStr)
+      );
+      const pickupsSnap = await getDocs(pickupsQuery);
+
+      const optedInStudents = new Set<string>();
+      pickupsSnap.forEach((doc) => {
+        const data = doc.data();
+        if (data.parentID && data.optedInStudents) {
+          data.optedInStudents.forEach((studentID: string) => {
+            optedInStudents.add(studentID);
+          });
+        }
+      });
+
+      return optedInStudents;
+    } catch (error) {
+      console.error("❌ Error fetching parent opt-ins:", error);
+      return new Set<string>();
+    }
+  };
+
+  const fetchData = async (): Promise<void> => {
+    try {
+      setLoading(true);
+      // @ts-ignore
+      const currentUserID = auth.currentUser?.uid;
+      if (!currentUserID) {
+        console.error("❌ No user logged in");
+        setLoading(false);
+        return;
+      }
+
+      const userDoc = await getDoc(doc(db, "users", currentUserID));
+      if (!userDoc.exists()) {
+        console.error("❌ User document not found");
+        setLoading(false);
+        return;
+      }
+
+      const userData = userDoc.data();
+      const driverID = userData.id;
+
+      const driverDoc = await getDoc(doc(db, "Driver", driverID));
+      if (!driverDoc.exists()) {
+        console.error("❌ driver document not found");
+        setLoading(false);
+        return;
+      }
+
+      const driverData = driverDoc.data();
+
+      const settings: DriverSettings = {
+        defaultPlateNumber: driverData.defaultPlateNumber,
+        defaultTimeSlot: driverData.defaultTimeSlot,
+      };
+      setDriverSettings(settings);
+      setTempSettings(settings);
+
+      let plates: string[] = [];
+      if (driverData.plateNumber) {
+        if (typeof driverData.plateNumber === "string") {
+          plates = [driverData.plateNumber];
+        } else if (Array.isArray(driverData.plateNumber)) {
+          plates = driverData.plateNumber;
+        }
+      }
+      setPlateNumbers(plates);
+
+      const studentQuery = query(
+        collection(db, "students"),
+        where("driverID", "==", driverID)
+      );
+      const studentSnap = await getDocs(studentQuery);
+      const studentList: Student[] = studentSnap.docs.map((docItem) => {
+        const data = docItem.data() as DocumentData;
+        return {
+          id: docItem.id,
+          name: data.name,
+          studentID: data.studentID,
+          ppic: data.ppic,
+          classID: data.classID,
+          parentID: data.parentID,
+        };
+      });
+      setAllStudents(studentList);
+
+      const dateStr = getMalaysiaDateString(new Date());
+      await fetchPresentStudents(studentList, dateStr);
+
+      const pickupDocRef = doc(db, "pickups", `${dateStr}_${driverID}`);
+      const pickupDoc = await getDoc(pickupDocRef);
+
+      if (pickupDoc.exists()) {
+        const data = pickupDoc.data() as PickupData;
+        setPickupData({
+          ...data,
+          students: studentList,
+          droppedOffStudents: data.droppedOffStudents || [],
+        });
+        setSelectedPlate(data.plateNumber);
+        setSelectedTimeSlot(data.timeSlot);
+      } else {
+        setPickupData(null);
+        const defaultPlate = settings.defaultPlateNumber || plates[0] || "";
+        const defaultTime = settings.defaultTimeSlot || TIME_SLOTS[0];
+        setSelectedPlate(defaultPlate);
+        setSelectedTimeSlot(defaultTime);
+      }
+    } catch (error) {
+      console.error("❌ Error fetching data:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchPresentStudents = async (
+    studentList: Student[],
+    dateStr: string
+  ): Promise<void> => {
+    try {
+      const attendanceQuery = query(
+        collection(db, "attendance"),
+        where("date", "==", dateStr)
+      );
+      const attendanceSnap = await getDocs(attendanceQuery);
+
+      const presentStudentIDs = new Set<string>();
+      attendanceSnap.forEach((doc) => {
+        const data = doc.data();
+        if (data.status === 1) {
+          presentStudentIDs.add(data.studentID);
+        }
+      });
+
+      const optedInStudents = await fetchParentOptIns(dateStr);
+
+      const present = studentList.filter((student) => {
+        const isPresent = presentStudentIDs.has(student.studentID);
+        const isOptedIn = optedInStudents.has(student.studentID);
+        return isPresent && !isOptedIn;
+      });
+
+      setPresentStudents(present);
+    } catch (error) {
+      console.error("❌ Error fetching present students:", error);
+      setPresentStudents([]);
+    }
+  };
+
+  useEffect(() => {
+    const dateStr = getMalaysiaDateString(currentDate);
+
+    const attendanceQuery = query(
+      collection(db, "attendance"),
+      where("date", "==", dateStr)
+    );
+
+    const pickupsQuery = query(
+      collection(db, "pickups"),
+      where("date", "==", dateStr)
+    );
+
+    const unsubscribeAttendance = onSnapshot(attendanceQuery, async () => {
+      const attendanceSnap = await getDocs(attendanceQuery);
+      const presentStudentIDs = new Set<string>();
+      attendanceSnap.forEach((doc) => {
+        const data = doc.data();
+        if (data.status === 1) {
+          presentStudentIDs.add(data.studentID);
+        }
+      });
+
+      const optedInStudents = await fetchParentOptIns(dateStr);
+
+      const present = allStudents.filter((student) => {
+        const isPresent = presentStudentIDs.has(student.studentID);
+        const isOptedIn = optedInStudents.has(student.studentID);
+        return isPresent && !isOptedIn;
+      });
+
+      setPresentStudents(present);
+    });
+
+    const unsubscribePickups = onSnapshot(pickupsQuery, async () => {
+      const attendanceSnap = await getDocs(attendanceQuery);
+      const presentStudentIDs = new Set<string>();
+      attendanceSnap.forEach((doc) => {
+        const data = doc.data();
+        if (data.status === 1) {
+          presentStudentIDs.add(data.studentID);
+        }
+      });
+
+      const optedInStudents = await fetchParentOptIns(dateStr);
+
+      const present = allStudents.filter((student) => {
+        const isPresent = presentStudentIDs.has(student.studentID);
+        const isOptedIn = optedInStudents.has(student.studentID);
+        return isPresent && !isOptedIn;
+      });
+
+      setPresentStudents(present);
+    });
+
+    return () => {
+      unsubscribeAttendance();
+      unsubscribePickups();
+    };
+  }, [allStudents, currentDate]);
+
+  // New function to send pickup notifications
+  const sendPickupNotifications = async (
+    students: Student[],
+    dateStr: string
+  ) => {
+    try {
+      for (const student of students) {
+        if (!student.parentID) continue;
+
+        const parentQuery = query(
+          collection(db, "Parent"),
+          where("id", "==", student.parentID)
+        );
+        const parentSnapshot = await getDocs(parentQuery);
+
+        if (!parentSnapshot.empty) {
+          const userQuery = query(
+            collection(db, "users"),
+            where("id", "==", student.parentID)
+          );
+          const userSnapshot = await getDocs(userQuery);
+
+          if (!userSnapshot.empty) {
+            const authUID = userSnapshot.docs[0].id;
+
+            await addDoc(collection(db, "notifications"), {
+              userId: authUID,
+              title: "🚌 Pickup Started",
+              message: `${
+                student.name
+              } has been picked up from school on ${new Date(
+                dateStr
+              ).toLocaleDateString("en-MY", {
+                weekday: "short",
+                year: "numeric",
+                month: "short",
+                day: "numeric",
+              })}. They are on their way home.`,
+              type: "info",
+              notiType: "pickup",
+              isRead: false,
+              timestamp: Timestamp.now(),
+            });
+
+            console.log(
+              `✅ Pickup notification sent to parent of ${student.name}`
+            );
+          }
+        }
+      }
+    } catch (error) {
+      console.error("❌ Error sending pickup notifications:", error);
+    }
+  };
+
+  // New function to send drop-off notification
+  const sendDropOffNotification = async (student: Student, dateStr: string) => {
+    try {
+      if (!student.parentID) return;
+
+      const parentQuery = query(
+        collection(db, "Parent"),
+        where("id", "==", student.parentID)
+      );
+      const parentSnapshot = await getDocs(parentQuery);
+
+      if (!parentSnapshot.empty) {
+        const userQuery = query(
+          collection(db, "users"),
+          where("id", "==", student.parentID)
+        );
+        const userSnapshot = await getDocs(userQuery);
+
+        if (!userSnapshot.empty) {
+          const authUID = userSnapshot.docs[0].id;
+
+          await addDoc(collection(db, "notifications"), {
+            userId: authUID,
+            title: "🏠 Student Dropped Off",
+            message: `${
+              student.name
+            } has been safely dropped off at their designated location on ${new Date(
+              dateStr
+            ).toLocaleDateString("en-MY", {
+              weekday: "short",
+              year: "numeric",
+              month: "short",
+              day: "numeric",
+            })}.`,
+            type: "success",
+            notiType: "dropoff",
+            isRead: false,
+            timestamp: Timestamp.now(),
+          });
+
+          console.log(
+            `✅ Drop-off notification sent to parent of ${student.name}`
+          );
+        }
+      }
+    } catch (error) {
+      console.error("❌ Error sending drop-off notification:", error);
+    }
+  };
+
+  const handleSave = async (): Promise<void> => {
+    try {
+      setSaving(true);
+      // @ts-ignore
+      const currentUserID = auth.currentUser?.uid;
+      if (!currentUserID) {
+        alert("❌ No user logged in");
+        return;
+      }
+
+      const userDoc = await getDoc(doc(db, "users", currentUserID));
+      if (!userDoc.exists()) {
+        alert("❌ User document not found");
+        return;
+      }
+
+      const driverID = userDoc.data().id;
+      const dateStr = getMalaysiaDateString(new Date());
+      const pickupDocRef = doc(db, "pickups", `${dateStr}_${driverID}`);
+
+      const studentIDs = presentStudents.map((s) => s.studentID);
+
+      if (studentIDs.length === 0) {
+        alert("⚠️ No students are present today. Cannot queue pickup.");
+        setSaving(false);
+        return;
+      }
+
+      await setDoc(pickupDocRef, {
+        driverID,
+        plateNumber: selectedPlate,
+        date: dateStr,
+        timeSlot: selectedTimeSlot,
+        status: "On the way",
+        studentIDs,
+        droppedOffStudents: [],
+        updatedAt: new Date().toISOString(),
+      });
+
+      alert("✅ Pickup details saved successfully!");
+      await fetchData();
+    } catch (error) {
+      console.error("❌ Error saving pickup:", error);
+      alert("Failed to save pickup details.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleConfirmArrival = async (): Promise<void> => {
+    try {
+      setSaving(true);
+      // @ts-ignore
+      const currentUserID = auth.currentUser?.uid;
+      if (!currentUserID) {
+        alert("❌ No user logged in");
+        return;
+      }
+
+      const userDoc = await getDoc(doc(db, "users", currentUserID));
+      if (!userDoc.exists()) {
+        alert("❌ User document not found");
+        return;
+      }
+
+      const driverID = userDoc.data().id;
+      const dateStr = getMalaysiaDateString(new Date());
+      const pickupDocRef = doc(db, "pickups", `${dateStr}_${driverID}`);
+
+      await setDoc(
+        pickupDocRef,
+        {
+          status: "Arrived",
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+
+      alert("✅ Arrival confirmed!");
+      await fetchData();
+    } catch (error) {
+      console.error("❌ Error confirming arrival:", error);
+      alert("Failed to confirm arrival.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDismiss = async (): Promise<void> => {
+    try {
+      setSaving(true);
+      // @ts-ignore
+      const currentUserID = auth.currentUser?.uid;
+      if (!currentUserID) {
+        alert("❌ No user logged in");
+        return;
+      }
+
+      const userDoc = await getDoc(doc(db, "users", currentUserID));
+      if (!userDoc.exists()) {
+        alert("❌ User document not found");
+        return;
+      }
+
+      const driverID = userDoc.data().id;
+      const dateStr = getMalaysiaDateString(new Date());
+      const pickupDocRef = doc(db, "pickups", `${dateStr}_${driverID}`);
+
+      await setDoc(
+        pickupDocRef,
+        {
+          status: "Dismissed",
+          droppedOffStudents: pickupData?.droppedOffStudents || [],
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+
+      // Send pickup notifications to all present students
+      await sendPickupNotifications(presentStudents, dateStr);
+
+      alert("✅ Pickup dismissed! Notifications sent to parents.");
+      await fetchData();
+    } catch (error) {
+      console.error("❌ Error dismissing pickup:", error);
+      alert("Failed to dismiss pickup.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleToggleDropOff = async (studentID: string): Promise<void> => {
+    try {
+      // @ts-ignore
+      const currentUserID = auth.currentUser?.uid;
+      if (!currentUserID) return;
+
+      const userDoc = await getDoc(doc(db, "users", currentUserID));
+      if (!userDoc.exists()) return;
+
+      const driverID = userDoc.data().id;
+      const dateStr = getMalaysiaDateString(new Date());
+      const pickupDocRef = doc(db, "pickups", `${dateStr}_${driverID}`);
+
+      const currentDroppedOff = pickupData?.droppedOffStudents || [];
+      const isCurrentlyDroppedOff = currentDroppedOff.includes(studentID);
+      const newDroppedOff = isCurrentlyDroppedOff
+        ? currentDroppedOff.filter((id) => id !== studentID)
+        : [...currentDroppedOff, studentID];
+
+      await setDoc(
+        pickupDocRef,
+        {
+          droppedOffStudents: newDroppedOff,
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+
+      // Send drop-off notification if student was just marked as dropped off
+      if (!isCurrentlyDroppedOff) {
+        const student = presentStudents.find((s) => s.studentID === studentID);
+        if (student) {
+          await sendDropOffNotification(student, dateStr);
+        }
+      }
+
+      await fetchData();
+    } catch (error) {
+      console.error("❌ Error toggling drop off:", error);
+    }
+  };
+
+  const handleSaveSettings = async (): Promise<void> => {
+    try {
+      setSaving(true);
+      // @ts-ignore
+      const currentUserID = auth.currentUser?.uid;
+      if (!currentUserID) {
+        alert("❌ No user logged in");
+        return;
+      }
+
+      const userDoc = await getDoc(doc(db, "users", currentUserID));
+      if (!userDoc.exists()) {
+        alert("❌ User document not found");
+        return;
+      }
+
+      const driverID = userDoc.data().id;
+      const driverDocRef = doc(db, "Driver", driverID);
+
+      await updateDoc(driverDocRef, {
+        defaultPlateNumber: tempSettings.defaultPlateNumber,
+        defaultTimeSlot: tempSettings.defaultTimeSlot,
+      });
+
+      setDriverSettings(tempSettings);
+
+      if (!pickupData) {
+        if (tempSettings.defaultPlateNumber) {
+          setSelectedPlate(tempSettings.defaultPlateNumber);
+        }
+        if (tempSettings.defaultTimeSlot) {
+          setSelectedTimeSlot(tempSettings.defaultTimeSlot);
+        }
+      }
+
+      setShowSettingsModal(false);
+      alert("✅ Default settings saved!");
+    } catch (error) {
+      console.error("❌ Error saving settings:", error);
+      alert("Failed to save settings.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleCloseModal = () => {
+    setTempSettings(driverSettings);
+    setShowSettingsModal(false);
+  };
+
+  const getMalaysiaDateString = (date: Date): string => {
+    const options = {
+      timeZone: "Asia/Kuala_Lumpur",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    } as const;
+    const formatter = new Intl.DateTimeFormat("en-CA", options);
+    const parts = formatter.formatToParts(date);
+    const year = parts.find((p) => p.type === "year")?.value || "";
+    const month = parts.find((p) => p.type === "month")?.value || "";
+    const day = parts.find((p) => p.type === "day")?.value || "";
+    return `${year}-${month}-${day}`;
+  };
+
+  const formatDate = (date: Date): string => {
+    return date.toLocaleDateString("en-MY", {
+      weekday: "short",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      timeZone: "Asia/Kuala_Lumpur",
+    });
+  };
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case "On the way":
+        return "#FF9800";
+      case "Arrived":
+        return "#4CAF50";
+      case "Dismissed":
+        return "#2196F3";
+      default:
+        return "#9E9E9E";
+    }
+  };
+
+  const getStatusBgColor = (status: string) => {
+    switch (status) {
+      case "On the way":
+        return "#FFF3E0";
+      case "Arrived":
+        return "#E8F5E9";
+      case "Dismissed":
+        return "#E3F2FD";
+      default:
+        return "#F5F5F5";
+    }
+  };
+
+  const getDropOffStats = () => {
+    const droppedOff = pickupData?.droppedOffStudents || [];
+    const total = presentStudents.length;
+    const completed = droppedOff.length;
+    return { completed, total };
+  };
+
+  const sortedStudents = () => {
+    const droppedOff = pickupData?.droppedOffStudents || [];
+    const notDroppedOff = presentStudents.filter(
+      (s) => !droppedOff.includes(s.studentID)
+    );
+    const dropped = presentStudents.filter((s) =>
+      droppedOff.includes(s.studentID)
+    );
+    return [...notDroppedOff, ...dropped];
+  };
+
+  return (
+    <>
+      <StatusBar backgroundColor="#67BA03" barStyle="light-content" />
+      <View style={styles.container}>
+        <LinearGradient
+          colors={["#67BA03", "#5AA002", "#4D8902"]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.header}
+        >
+          <View style={styles.circleDecor1} />
+          <View style={styles.circleDecor2} />
+          <View style={styles.headerContent}>
+            <Text style={styles.headerTitle}>Pickup Service</Text>
+            <TouchableOpacity
+              onPress={() => setShowSettingsModal(true)}
+              style={styles.settingsButton}
+            >
+              <Ionicons name="settings-outline" size={22} color="#fff" />
+            </TouchableOpacity>
+          </View>
+        </LinearGradient>
+
+        <ScrollView
+          ref={scrollViewRef}
+          style={styles.content}
+          showsVerticalScrollIndicator={false}
+        >
+          <Animated.View
+            style={[
+              styles.dateCard,
+              {
+                opacity: fadeAnim,
+                transform: [{ translateY: slideAnim }],
+              },
+            ]}
+          >
+            <View style={styles.dateHeader}>
+              <View style={styles.dateIconBg}>
+                <Ionicons name="calendar-outline" size={24} color="#67BA03" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.dateLabel}>Today's Date</Text>
+                <Text style={styles.dateText}>{formatDate(currentDate)}</Text>
+              </View>
+            </View>
+            <View style={styles.reminderBox}>
+              <Ionicons name="alert-circle" size={20} color="#FF9800" />
+              <Text style={styles.reminderText}>
+                Students opted-in by parents will not appear in your list.
+              </Text>
+            </View>
+          </Animated.View>
+
+          {pickupData && (
+            <Animated.View
+              style={[
+                styles.statusCard,
+                {
+                  opacity: fadeAnim,
+                  transform: [{ translateY: slideAnim }],
+                },
+              ]}
+            >
+              <View style={styles.statusHeader}>
+                <Text style={styles.statusTitle}>Current Status</Text>
+                <View
+                  style={[
+                    styles.statusBadge,
+                    { backgroundColor: getStatusBgColor(pickupData.status) },
+                  ]}
+                >
+                  <View
+                    style={[
+                      styles.statusDot,
+                      { backgroundColor: getStatusColor(pickupData.status) },
+                    ]}
+                  />
+                  <Text
+                    style={[
+                      styles.statusText,
+                      { color: getStatusColor(pickupData.status) },
+                    ]}
+                  >
+                    {pickupData.status}
+                  </Text>
+                </View>
+              </View>
+            </Animated.View>
+          )}
+
+          <Animated.View
+            style={[
+              styles.card,
+              {
+                opacity: fadeAnim,
+                transform: [{ translateY: slideAnim }],
+              },
+            ]}
+          >
+            <View style={styles.cardHeader}>
+              <View style={styles.cardIconBg}>
+                <Ionicons name="car-sport" size={24} color="#67BA03" />
+              </View>
+              <Text style={styles.cardTitle}>Vehicle & Time Slot</Text>
+            </View>
+
+            <View style={styles.compactSection}>
+              <Text style={styles.sectionLabel}>Select Vehicle</Text>
+              <View style={styles.compactPlateGrid}>
+                {plateNumbers.length > 0 ? (
+                  plateNumbers.map((plate, index) => (
+                    <TouchableOpacity
+                      key={index}
+                      style={[
+                        styles.compactPlateButton,
+                        selectedPlate === plate &&
+                          styles.compactPlateButtonSelected,
+                      ]}
+                      onPress={() => setSelectedPlate(plate)}
+                      disabled={
+                        pickupData?.status === "Arrived" ||
+                        pickupData?.status === "Dismissed"
+                      }
+                      activeOpacity={0.7}
+                    >
+                      <Text
+                        style={[
+                          styles.compactPlateText,
+                          selectedPlate === plate &&
+                            styles.compactPlateTextSelected,
+                        ]}
+                      >
+                        {plate}
+                      </Text>
+                      {selectedPlate === plate && (
+                        <Ionicons
+                          name="checkmark-circle"
+                          size={16}
+                          color="#67BA03"
+                        />
+                      )}
+                    </TouchableOpacity>
+                  ))
+                ) : (
+                  <Text style={styles.noDataText}>
+                    No plate numbers registered
+                  </Text>
+                )}
+              </View>
+            </View>
+
+            <View style={styles.divider} />
+
+            <View style={styles.compactSection}>
+              <Text style={styles.sectionLabel}>Pick-up Time</Text>
+              <View style={styles.compactTimeGrid}>
+                {TIME_SLOTS.map((slot) => (
+                  <TouchableOpacity
+                    key={slot}
+                    style={[
+                      styles.compactTimeButton,
+                      selectedTimeSlot === slot &&
+                        styles.compactTimeButtonSelected,
+                    ]}
+                    onPress={() => setSelectedTimeSlot(slot)}
+                    disabled={
+                      pickupData?.status === "Arrived" ||
+                      pickupData?.status === "Dismissed"
+                    }
+                    activeOpacity={0.7}
+                  >
+                    <Text
+                      style={[
+                        styles.compactTimeText,
+                        selectedTimeSlot === slot &&
+                          styles.compactTimeTextSelected,
+                      ]}
+                    >
+                      {slot}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+
+            <View style={styles.divider} />
+
+            <View style={styles.buttonContainer}>
+              {pickupData?.status !== "Arrived" &&
+                pickupData?.status !== "Dismissed" && (
+                  <TouchableOpacity
+                    style={[
+                      styles.actionButton,
+                      (saving ||
+                        !selectedPlate ||
+                        !selectedTimeSlot ||
+                        presentStudents.length === 0) &&
+                        styles.buttonDisabled,
+                    ]}
+                    onPress={handleSave}
+                    disabled={
+                      saving ||
+                      !selectedPlate ||
+                      !selectedTimeSlot ||
+                      presentStudents.length === 0
+                    }
+                    activeOpacity={0.8}
+                  >
+                    <LinearGradient
+                      colors={["#E0E0E0", "#BDBDBD"]}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={styles.buttonGradient}
+                    >
+                      {saving ? (
+                        <ActivityIndicator color="#333" />
+                      ) : (
+                        <>
+                          <Ionicons
+                            name="save-outline"
+                            size={20}
+                            color="#333"
+                          />
+                          <Text style={styles.saveButtonText}>
+                            Queue Pickup
+                          </Text>
+                        </>
+                      )}
+                    </LinearGradient>
+                  </TouchableOpacity>
+                )}
+
+              {pickupData?.status === "On the way" && (
+                <TouchableOpacity
+                  style={[styles.actionButton, saving && styles.buttonDisabled]}
+                  onPress={handleConfirmArrival}
+                  disabled={saving}
+                  activeOpacity={0.8}
+                >
+                  <LinearGradient
+                    colors={["#67BA03", "#5AA002"]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.buttonGradient}
+                  >
+                    {saving ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <>
+                        <Ionicons
+                          name="checkmark-circle"
+                          size={24}
+                          color="#fff"
+                        />
+                        <Text style={styles.confirmButtonText}>
+                          Confirm Arrival
+                        </Text>
+                      </>
+                    )}
+                  </LinearGradient>
+                </TouchableOpacity>
+              )}
+
+              {pickupData?.status === "Arrived" && (
+                <TouchableOpacity
+                  style={[styles.actionButton, saving && styles.buttonDisabled]}
+                  onPress={handleDismiss}
+                  disabled={saving}
+                  activeOpacity={0.8}
+                >
+                  <LinearGradient
+                    colors={["#2196F3", "#1976D2"]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.buttonGradient}
+                  >
+                    {saving ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <>
+                        <Ionicons name="exit-outline" size={24} color="#fff" />
+                        <Text style={styles.confirmButtonText}>Dismiss</Text>
+                      </>
+                    )}
+                  </LinearGradient>
+                </TouchableOpacity>
+              )}
+            </View>
+          </Animated.View>
+
+          <Animated.View
+            style={[
+              styles.card,
+              {
+                opacity: fadeAnim,
+                transform: [{ translateY: slideAnim }],
+              },
+            ]}
+          >
+            <View style={styles.cardHeader}>
+              <View style={styles.cardIconBg}>
+                <Ionicons name="people" size={24} color="#FF9800" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.cardTitle}>Students Present Today</Text>
+                <Text style={styles.cardSubtitle}>
+                  {presentStudents.length} of {allStudents.length} student(s)
+                  need pickup
+                </Text>
+              </View>
+              {pickupData?.status === "Dismissed" && (
+                <TouchableOpacity
+                  style={styles.dropOffButton}
+                  onPress={() => setShowDropOffModal(true)}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="bus-outline" size={20} color="#fff" />
+                  <Text style={styles.dropOffButtonText}>Drop Off</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
+            {loading ? (
+              <View style={styles.loadingContainer}>
+                <ActivityIndicator size="small" color="#FF9800" />
+              </View>
+            ) : presentStudents.length > 0 ? (
+              <View style={styles.studentList}>
+                {presentStudents.map((student) => (
+                  <View key={student.id} style={styles.studentItem}>
+                    <View style={styles.studentAvatar}>
+                      {student.ppic ? (
+                        <Image
+                          source={{ uri: student.ppic }}
+                          style={styles.studentAvatarImage}
+                        />
+                      ) : (
+                        <Text style={styles.studentAvatarText}>
+                          {student.name.charAt(0).toUpperCase()}
+                        </Text>
+                      )}
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.studentName}>{student.name}</Text>
+                      <Text style={styles.studentID}>
+                        ID: {student.studentID}
+                      </Text>
+                    </View>
+                    <View style={styles.presentBadge}>
+                      <Ionicons
+                        name="checkmark-circle"
+                        size={16}
+                        color="#4CAF50"
+                      />
+                      <Text style={styles.presentText}>Present</Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            ) : (
+              <View style={styles.emptyState}>
+                <Ionicons name="people-outline" size={48} color="#E0E0E0" />
+                <Text style={styles.emptyStateText}>
+                  {allStudents.length === 0
+                    ? "No students assigned to you"
+                    : "No students are present today"}
+                </Text>
+                {allStudents.length > 0 && presentStudents.length === 0 && (
+                  <Text style={styles.emptyStateSubtext}>
+                    Students may be absent or opted-in by parents
+                  </Text>
+                )}
+              </View>
+            )}
+          </Animated.View>
+
+          <View style={{ height: 30 }} />
+        </ScrollView>
+
+        <Modal
+          visible={showSettingsModal}
+          animationType="slide"
+          transparent={true}
+          onRequestClose={handleCloseModal}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Default Settings</Text>
+                <TouchableOpacity
+                  onPress={handleCloseModal}
+                  style={styles.closeButton}
+                >
+                  <Ionicons name="close" size={24} color="#666" />
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView style={styles.modalBody}>
+                <Text style={styles.modalDescription}>
+                  Set your default preferences to save time on daily pickups
+                </Text>
+
+                <View style={styles.settingSection}>
+                  <Text style={styles.settingLabel}>Default Vehicle</Text>
+                  <View style={styles.compactPlateGrid}>
+                    {plateNumbers.map((plate, index) => (
+                      <TouchableOpacity
+                        key={index}
+                        style={[
+                          styles.compactPlateButton,
+                          tempSettings.defaultPlateNumber === plate &&
+                            styles.compactPlateButtonSelected,
+                        ]}
+                        onPress={() =>
+                          setTempSettings({
+                            ...tempSettings,
+                            defaultPlateNumber: plate,
+                          })
+                        }
+                        activeOpacity={0.7}
+                      >
+                        <Text
+                          style={[
+                            styles.compactPlateText,
+                            tempSettings.defaultPlateNumber === plate &&
+                              styles.compactPlateTextSelected,
+                          ]}
+                        >
+                          {plate}
+                        </Text>
+                        {tempSettings.defaultPlateNumber === plate && (
+                          <Ionicons
+                            name="checkmark-circle"
+                            size={16}
+                            color="#67BA03"
+                          />
+                        )}
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+
+                <View style={styles.settingSection}>
+                  <Text style={styles.settingLabel}>Default Time Slot</Text>
+                  <View style={styles.compactTimeGrid}>
+                    {TIME_SLOTS.map((slot) => (
+                      <TouchableOpacity
+                        key={slot}
+                        style={[
+                          styles.compactTimeButton,
+                          tempSettings.defaultTimeSlot === slot &&
+                            styles.compactTimeButtonSelected,
+                        ]}
+                        onPress={() =>
+                          setTempSettings({
+                            ...tempSettings,
+                            defaultTimeSlot: slot,
+                          })
+                        }
+                        activeOpacity={0.7}
+                      >
+                        <Text
+                          style={[
+                            styles.compactTimeText,
+                            tempSettings.defaultTimeSlot === slot &&
+                              styles.compactTimeTextSelected,
+                          ]}
+                        >
+                          {slot}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+
+                <View style={styles.infoBox}>
+                  <Ionicons
+                    name="information-circle"
+                    size={20}
+                    color="#2196F3"
+                  />
+                  <Text style={styles.infoText}>
+                    These defaults will be automatically selected when you visit
+                    this page
+                  </Text>
+                </View>
+              </ScrollView>
+
+              <View style={styles.modalFooter}>
+                <TouchableOpacity
+                  style={styles.modalActionButton}
+                  onPress={handleSaveSettings}
+                  disabled={saving}
+                  activeOpacity={0.8}
+                >
+                  <LinearGradient
+                    colors={["#67BA03", "#5AA002"]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.buttonGradient}
+                  >
+                    {saving ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.modalButtonText}>Save Settings</Text>
+                    )}
+                  </LinearGradient>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
+        <Modal
+          visible={showDropOffModal}
+          animationType="slide"
+          transparent={true}
+          onRequestClose={() => setShowDropOffModal(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.modalTitle}>Drop Off Students</Text>
+                  <Text style={styles.dropOffStats}>
+                    {getDropOffStats().completed} of {getDropOffStats().total}{" "}
+                    dropped off
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  onPress={() => setShowDropOffModal(false)}
+                  style={styles.closeButton}
+                >
+                  <Ionicons name="close" size={24} color="#666" />
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView style={styles.modalBody}>
+                <View style={styles.dropOffProgress}>
+                  <View style={styles.progressBarBg}>
+                    <View
+                      style={[
+                        styles.progressBarFill,
+                        {
+                          width: `${
+                            (getDropOffStats().completed /
+                              getDropOffStats().total) *
+                            100
+                          }%`,
+                        },
+                      ]}
+                    />
+                  </View>
+                </View>
+
+                <View style={styles.dropOffList}>
+                  {sortedStudents().map((student) => {
+                    const isDroppedOff = (
+                      pickupData?.droppedOffStudents || []
+                    ).includes(student.studentID);
+                    return (
+                      <TouchableOpacity
+                        key={student.id}
+                        style={[
+                          styles.dropOffItem,
+                          isDroppedOff && styles.dropOffItemCompleted,
+                        ]}
+                        onPress={() => handleToggleDropOff(student.studentID)}
+                        activeOpacity={0.7}
+                      >
+                        <View style={styles.studentAvatar}>
+                          {student.ppic ? (
+                            <Image
+                              source={{ uri: student.ppic }}
+                              style={styles.studentAvatarImage}
+                            />
+                          ) : (
+                            <Text style={styles.studentAvatarText}>
+                              {student.name.charAt(0).toUpperCase()}
+                            </Text>
+                          )}
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text
+                            style={[
+                              styles.studentName,
+                              isDroppedOff && styles.studentNameCompleted,
+                            ]}
+                          >
+                            {student.name}
+                          </Text>
+                          <Text
+                            style={[
+                              styles.studentID,
+                              isDroppedOff && styles.studentIDCompleted,
+                            ]}
+                          >
+                            ID: {student.studentID}
+                          </Text>
+                        </View>
+                        {isDroppedOff ? (
+                          <View style={styles.droppedOffBadge}>
+                            <Ionicons
+                              name="checkmark-circle"
+                              size={24}
+                              color="#4CAF50"
+                            />
+                            <Text style={styles.droppedOffText}>
+                              Dropped Off
+                            </Text>
+                          </View>
+                        ) : (
+                          <View style={styles.pendingBadge}>
+                            <Ionicons
+                              name="ellipse-outline"
+                              size={24}
+                              color="#999"
+                            />
+                            <Text style={styles.pendingText}>Pending</Text>
+                          </View>
+                        )}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </ScrollView>
+            </View>
+          </View>
+        </Modal>
+      </View>
+    </>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: "#F5F7FA",
+  },
+  header: {
+    borderBottomLeftRadius: 30,
+    borderBottomRightRadius: 30,
+    paddingVertical: 20,
+    paddingHorizontal: 20,
+    overflow: "hidden",
+    elevation: 8,
+    height: 140,
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  circleDecor1: {
+    position: "absolute",
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    backgroundColor: "rgba(255, 255, 255, 0.1)",
+    top: -50,
+    right: -30,
+  },
+  circleDecor2: {
+    position: "absolute",
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: "rgba(255, 255, 255, 0.08)",
+    bottom: -20,
+    left: -20,
+  },
+  headerContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    zIndex: 1,
+    marginTop: 60,
+  },
+  headerTitle: {
+    color: "#fff",
+    fontSize: 20,
+    fontWeight: "bold",
+    textAlign: "center",
+    flex: 1,
+  },
+  settingsButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: "rgba(255, 255, 255, 0.2)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  content: {
+    flex: 1,
+    padding: 20,
+  },
+  dateCard: {
+    backgroundColor: "#fff",
+    borderRadius: 20,
+    padding: 20,
+    marginBottom: 16,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    borderWidth: 1,
+    borderColor: "rgba(103, 186, 3, 0.1)",
+  },
+  dateHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 16,
+    gap: 12,
+  },
+  dateIconBg: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    backgroundColor: "#E8F5E9",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  dateLabel: {
+    fontSize: 12,
+    color: "#999",
+    fontWeight: "500",
+    marginBottom: 4,
+  },
+  dateText: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#333",
+  },
+  reminderBox: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    backgroundColor: "#FFF3E0",
+    padding: 14,
+    borderRadius: 12,
+    gap: 10,
+  },
+  reminderText: {
+    fontSize: 13,
+    color: "#E65100",
+    flex: 1,
+    lineHeight: 20,
+  },
+  statusCard: {
+    backgroundColor: "#fff",
+    borderRadius: 20,
+    padding: 20,
+    marginBottom: 16,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  statusHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  statusTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#333",
+  },
+  statusBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    gap: 6,
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  statusText: {
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  card: {
+    backgroundColor: "#fff",
+    borderRadius: 20,
+    padding: 20,
+    marginBottom: 16,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  cardHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 20,
+    gap: 12,
+  },
+  cardIconBg: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    backgroundColor: "#F5F7FA",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  cardTitle: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: "#333",
+  },
+  cardSubtitle: {
+    fontSize: 13,
+    color: "#999",
+    marginTop: 2,
+  },
+  dropOffButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#FF9800",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    gap: 6,
+  },
+  dropOffButtonText: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  compactSection: {
+    marginBottom: 16,
+  },
+  sectionLabel: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: "#666",
+    marginBottom: 10,
+  },
+  compactPlateGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  compactPlateButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#F5F7FA",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: "#E0E0E0",
+    gap: 6,
+  },
+  compactPlateButtonSelected: {
+    backgroundColor: "#E8F5E9",
+    borderColor: "#67BA03",
+  },
+  compactPlateText: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#666",
+  },
+  compactPlateTextSelected: {
+    color: "#67BA03",
+  },
+  divider: {
+    height: 1,
+    backgroundColor: "#E0E0E0",
+    marginVertical: 16,
+  },
+  compactTimeGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  compactTimeButton: {
+    flex: 1,
+    minWidth: 100,
+    backgroundColor: "#F5F7FA",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: "#E0E0E0",
+    alignItems: "center",
+  },
+  compactTimeButtonSelected: {
+    backgroundColor: "#E3F2FD",
+    borderColor: "#2196F3",
+  },
+  compactTimeText: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#666",
+  },
+  compactTimeTextSelected: {
+    color: "#2196F3",
+  },
+  loadingContainer: {
+    paddingVertical: 30,
+    alignItems: "center",
+  },
+  studentList: {
+    gap: 12,
+  },
+  studentItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#F5F7FA",
+    padding: 14,
+    borderRadius: 12,
+    gap: 12,
+  },
+  studentAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: "#Ffffff",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  studentAvatarText: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#67BA03",
+  },
+  studentName: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "#333",
+    marginBottom: 2,
+  },
+  studentID: {
+    fontSize: 12,
+    color: "#999",
+  },
+  presentBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "#E8F5E9",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  presentText: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: "#4CAF50",
+  },
+  emptyState: {
+    alignItems: "center",
+    paddingVertical: 30,
+    gap: 12,
+  },
+  emptyStateText: {
+    fontSize: 14,
+    color: "#999",
+    fontStyle: "italic",
+    textAlign: "center",
+  },
+  emptyStateSubtext: {
+    fontSize: 12,
+    color: "#BBB",
+    fontStyle: "italic",
+    textAlign: "center",
+    marginTop: 4,
+  },
+  noDataText: {
+    fontSize: 13,
+    color: "#999",
+    fontStyle: "italic",
+  },
+  buttonContainer: {
+    gap: 12,
+  },
+  actionButton: {
+    borderRadius: 16,
+    overflow: "hidden",
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  buttonGradient: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 16,
+    gap: 8,
+  },
+  saveButtonText: {
+    color: "#333",
+    fontWeight: "700",
+    fontSize: 15,
+  },
+  confirmButtonText: {
+    color: "#fff",
+    fontWeight: "700",
+    fontSize: 16,
+  },
+  buttonDisabled: {
+    opacity: 0.5,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.5)",
+    justifyContent: "flex-end",
+    marginBottom: 20,
+  },
+  modalContent: {
+    backgroundColor: "#fff",
+    borderTopLeftRadius: 30,
+    borderTopRightRadius: 30,
+    maxHeight: "80%",
+    elevation: 10,
+  },
+  modalHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: "#F0F0F0",
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: "700",
+    color: "#333",
+  },
+  dropOffStats: {
+    fontSize: 14,
+    color: "#666",
+    marginTop: 4,
+  },
+  closeButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "#F5F7FA",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  modalBody: {
+    padding: 20,
+  },
+  modalDescription: {
+    fontSize: 14,
+    color: "#666",
+    marginBottom: 20,
+    lineHeight: 20,
+  },
+  settingSection: {
+    marginBottom: 24,
+  },
+  settingLabel: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "#333",
+    marginBottom: 12,
+  },
+  studentAvatarImage: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+  },
+  infoBox: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    backgroundColor: "#E3F2FD",
+    padding: 14,
+    borderRadius: 12,
+    gap: 10,
+    marginTop: 10,
+  },
+  infoText: {
+    fontSize: 13,
+    color: "#1976D2",
+    flex: 1,
+    lineHeight: 18,
+  },
+  modalFooter: {
+    padding: 20,
+    borderTopWidth: 1,
+    borderTopColor: "#F0F0F0",
+  },
+  modalActionButton: {
+    borderRadius: 16,
+    overflow: "hidden",
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+  },
+  modalButtonText: {
+    color: "#fff",
+    fontWeight: "700",
+    fontSize: 16,
+  },
+  dropOffProgress: {
+    marginBottom: 20,
+  },
+  progressBarBg: {
+    height: 8,
+    backgroundColor: "#E0E0E0",
+    borderRadius: 4,
+    overflow: "hidden",
+  },
+  progressBarFill: {
+    height: "100%",
+    backgroundColor: "#4CAF50",
+    borderRadius: 4,
+  },
+  dropOffList: {
+    gap: 12,
+  },
+  dropOffItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#F5F7FA",
+    padding: 14,
+    borderRadius: 12,
+    gap: 12,
+    borderWidth: 2,
+    borderColor: "transparent",
+  },
+  dropOffItemCompleted: {
+    backgroundColor: "#E8F5E9",
+    borderColor: "#4CAF50",
+    opacity: 0.7,
+  },
+  studentNameCompleted: {
+    textDecorationLine: "line-through",
+    color: "#999",
+  },
+  studentIDCompleted: {
+    textDecorationLine: "line-through",
+    color: "#CCC",
+  },
+  droppedOffBadge: {
+    alignItems: "center",
+    gap: 4,
+  },
+  droppedOffText: {
+    fontSize: 11,
+    color: "#4CAF50",
+    fontWeight: "600",
+  },
+  pendingBadge: {
+    alignItems: "center",
+    gap: 4,
+  },
+  pendingText: {
+    fontSize: 11,
+    color: "#999",
+    fontWeight: "600",
+  },
+});

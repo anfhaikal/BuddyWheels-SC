@@ -1,0 +1,176 @@
+import {
+  collection,
+  onSnapshot,
+  orderBy,
+  query,
+  Timestamp,
+  where,
+} from "firebase/firestore";
+import React, { useEffect, useState } from "react";
+import { FlatList, StyleSheet, Text, View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+
+import { useFocusEffect } from "@react-navigation/native";
+// @ts-ignore
+import { auth, db } from "../../firebaseConfig";
+
+interface Notification {
+  id: string;
+  title: string;
+  message: string;
+  type?: "success" | "info" | "warning" | "error";
+  isRead?: boolean;
+  timestamp?: Timestamp;
+  userId?: string;
+}
+
+export default function NotificationsScreen() {
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [scrollRef, setScrollRef] = useState<FlatList<Notification> | null>(
+    null
+  );
+
+  useEffect(() => {
+    // @ts-ignore
+    const user = auth.currentUser;
+    if (!user) return;
+
+    const q = query(
+      collection(db, "notifications"),
+      where("userId", "==", user.uid),
+      orderBy("timestamp", "desc")
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const data = snapshot.docs.map((doc) => {
+        const docData = doc.data() as Omit<Notification, "id">;
+        return { id: doc.id, ...docData };
+      });
+      setNotifications(data);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // ✅ Reset scroll to top whenever user opens this tab
+  useFocusEffect(
+    React.useCallback(() => {
+      scrollRef?.scrollToOffset({ animated: false, offset: 0 });
+    }, [scrollRef])
+  );
+
+  // ✅ Type-safe mapping for notification type styles
+  const notificationTypeStyles = {
+    success: styles.success,
+    info: styles.info,
+    warning: styles.warning,
+    error: styles.error,
+  };
+
+  return (
+    <SafeAreaView style={styles.container}>
+      {/* ✅ Green Header (same as Profile) */}
+      <View style={styles.header}>
+        <Text style={styles.headerText}>Notifications</Text>
+      </View>
+
+      {/* ✅ Content Section */}
+      <View style={styles.content}>
+        {notifications.length === 0 ? (
+          <Text style={styles.empty}>No notifications yet</Text>
+        ) : (
+          <FlatList
+            ref={setScrollRef}
+            data={notifications}
+            keyExtractor={(item) => item.id}
+            renderItem={({ item }) => (
+              <View
+                style={[
+                  styles.card,
+                  notificationTypeStyles[item.type || "info"],
+                ]}
+              >
+                <Text style={styles.title}>{item.title}</Text>
+                <Text style={styles.message}>{item.message}</Text>
+                <Text style={styles.time}>
+                  {item.timestamp
+                    ? item.timestamp.toDate().toLocaleString()
+                    : ""}
+                </Text>
+              </View>
+            )}
+          />
+        )}
+      </View>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: "#F5F5F5", // same as profile
+  },
+  header: {
+    backgroundColor: "#67BA03",
+    paddingVertical: 22,
+    paddingHorizontal: 20,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  headerText: {
+    color: "#fff",
+    fontSize: 20,
+    fontWeight: "bold",
+  },
+  content: {
+    flex: 1,
+    padding: 16,
+  },
+  empty: {
+    textAlign: "center",
+    marginTop: 30,
+    color: "#777",
+  },
+  card: {
+    backgroundColor: "white",
+    padding: 12,
+    borderRadius: 10,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "#eee",
+    shadowColor: "#000",
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  title: {
+    fontWeight: "bold",
+    fontSize: 16,
+  },
+  message: {
+    color: "#333",
+    marginTop: 4,
+  },
+  time: {
+    fontSize: 12,
+    color: "#999",
+    marginTop: 4,
+  },
+  success: {
+    borderLeftColor: "green",
+    borderLeftWidth: 4,
+  },
+  info: {
+    borderLeftColor: "#007bff",
+    borderLeftWidth: 4,
+  },
+  warning: {
+    borderLeftColor: "orange",
+    borderLeftWidth: 4,
+  },
+  error: {
+    borderLeftColor: "red",
+    borderLeftWidth: 4,
+  },
+});

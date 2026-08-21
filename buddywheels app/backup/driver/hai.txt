@@ -1,0 +1,895 @@
+import { Ionicons } from "@expo/vector-icons";
+import { LinearGradient } from "expo-linear-gradient";
+import { router } from "expo-router";
+import {
+  collection,
+  doc,
+  DocumentData,
+  onSnapshot,
+  query,
+  where,
+} from "firebase/firestore";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import {
+  ActivityIndicator,
+  Animated,
+  Image,
+  RefreshControl,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
+// @ts-ignore
+import { auth, db } from "../../firebaseConfig";
+
+interface Student {
+  id: string;
+  name: string;
+  studentID: string;
+  ppic?: string;
+  parentID?: string;
+  className?: string;
+}
+
+interface TodayPickup {
+  status: "No status" | "On the way" | "Arrived" | "Dismissed";
+  timeSlot?: string;
+  plateNumber?: string;
+  studentCount: number;
+}
+
+export default function DriverHome() {
+  const [userData, setUserData] = useState<any>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [students, setStudents] = useState<Student[]>([]);
+  const [loadingStudents, setLoadingStudents] = useState(true);
+  const [todayPickup, setTodayPickup] = useState<TodayPickup | null>(null);
+  const [driverID, setDriverID] = useState<string | null>(null);
+
+  const scaleAnim1 = useRef(new Animated.Value(1)).current;
+  const scaleAnim2 = useRef(new Animated.Value(1)).current;
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 800,
+      useNativeDriver: true,
+    }).start();
+  }, []);
+
+  const getMalaysiaDateString = (date: Date): string => {
+    const options = {
+      timeZone: "Asia/Kuala_Lumpur",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    } as const;
+    const formatter = new Intl.DateTimeFormat("en-CA", options);
+    const parts = formatter.formatToParts(date);
+    const year = parts.find((p) => p.type === "year")?.value || "";
+    const month = parts.find((p) => p.type === "month")?.value || "";
+    const day = parts.find((p) => p.type === "day")?.value || "";
+    return `${year}-${month}-${day}`;
+  };
+
+  // Real-time listener for user data
+  useEffect(() => {
+    // @ts-ignore
+    const user = auth.currentUser;
+    if (!user) return;
+
+    const userRef = doc(db, "users", user.uid);
+    const unsubscribe = onSnapshot(userRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setUserData(data);
+        setDriverID(data.id);
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Real-time listener for students
+  useEffect(() => {
+    if (!driverID) return;
+
+    setLoadingStudents(true);
+
+    const studentsQuery = query(
+      collection(db, "students"),
+      where("driverID", "==", driverID)
+    );
+
+    const unsubscribe = onSnapshot(
+      studentsQuery,
+      (snapshot) => {
+        const studentList: Student[] = snapshot.docs.map((docItem) => {
+          const data = docItem.data() as DocumentData;
+          return {
+            id: docItem.id,
+            name: data.name,
+            studentID: data.studentID,
+            ppic: data.ppic,
+            parentID: data.parentID,
+            className: data.className,
+          };
+        });
+
+        setStudents(studentList);
+        setLoadingStudents(false);
+      },
+      (error) => {
+        console.error("Error listening to students:", error);
+        setLoadingStudents(false);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [driverID]);
+
+  // Real-time listener for today's pickup
+  useEffect(() => {
+    if (!driverID) return;
+
+    const dateStr = getMalaysiaDateString(new Date());
+    const pickupDocRef = doc(db, "pickups", `${dateStr}_${driverID}`);
+
+    const unsubscribe = onSnapshot(
+      pickupDocRef,
+      (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          setTodayPickup({
+            status: data.status || "No status",
+            timeSlot: data.timeSlot,
+            plateNumber: data.plateNumber,
+            studentCount: data.studentIDs?.length || 0,
+          });
+        } else {
+          setTodayPickup(null);
+        }
+      },
+      (error) => {
+        console.error("Error listening to pickup:", error);
+        setTodayPickup(null);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [driverID]);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    // The real-time listeners will automatically update the data
+    // We just add a small delay for user feedback
+    setTimeout(() => setRefreshing(false), 800);
+  }, []);
+
+  const handlePressIn = (anim: Animated.Value) => {
+    Animated.spring(anim, {
+      toValue: 0.95,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const handlePressOut = (anim: Animated.Value) => {
+    Animated.spring(anim, {
+      toValue: 1,
+      friction: 3,
+      tension: 40,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case "On the way":
+        return "#FF9800";
+      case "Arrived":
+        return "#4CAF50";
+      case "Dismissed":
+        return "#2196F3";
+      default:
+        return "#9E9E9E";
+    }
+  };
+
+  const getStatusBgColor = (status: string) => {
+    switch (status) {
+      case "On the way":
+        return "#FFF3E0";
+      case "Arrived":
+        return "#E8F5E9";
+      case "Dismissed":
+        return "#E3F2FD";
+      default:
+        return "#F5F5F5";
+    }
+  };
+
+  return (
+    <>
+      <StatusBar
+        backgroundColor="#67BA03"
+        barStyle="light-content"
+        translucent={false}
+      />
+      <View style={styles.container}>
+        <LinearGradient
+          colors={["#67BA03", "#5AA002", "#4D8902"]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.header}
+        >
+          {/* Decorative circles */}
+          <View style={styles.circleDecor1} />
+          <View style={styles.circleDecor2} />
+          <View style={styles.circleDecor3} />
+
+          <View style={styles.headerContent}>
+            {/* Avatar with glow effect */}
+            <View style={styles.avatarContainer}>
+              <View style={styles.avatarGlow} />
+              <Image
+                source={{
+                  uri:
+                    userData?.ppic ||
+                    "https://cdn-icons-png.flaticon.com/512/3135/3135715.png",
+                }}
+                style={styles.avatar}
+              />
+              <View style={styles.onlineIndicator} />
+            </View>
+
+            {/* Text content */}
+            <View style={styles.headerTextContainer}>
+              <Text style={styles.headerSubtitle}>Welcome back,</Text>
+              <Text style={styles.headerTitle}>
+                {userData?.fullName || "Driver"} 👋
+              </Text>
+              <View style={styles.roleBadge}>
+                <Ionicons name="car-sport" size={12} color="#67BA03" />
+                <Text style={styles.roleText}>Driver</Text>
+              </View>
+            </View>
+
+            {/* Notification with badge */}
+            <TouchableOpacity
+              activeOpacity={0.7}
+              onPress={() => router.push("/(driver)/notification")}
+              style={styles.notificationButton}
+            >
+              <View style={styles.notificationIconContainer}>
+                <Ionicons name="notifications" size={24} color="#67BA03" />
+                <View style={styles.notificationBadge}>
+                  <Text style={styles.notificationBadgeText}>2</Text>
+                </View>
+              </View>
+            </TouchableOpacity>
+          </View>
+        </LinearGradient>
+
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor="#67BA03"
+              colors={["#67BA03"]}
+            />
+          }
+        >
+          {/* Today's Pickup Status - Always show */}
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Today's Pickup</Text>
+            <View style={styles.sectionLine} />
+          </View>
+
+          <TouchableOpacity
+            activeOpacity={0.8}
+            onPress={() => router.push("/pickup")}
+            style={{ marginHorizontal: 20, marginTop: 16 }}
+          >
+            <Animated.View style={[styles.pickupCard, { opacity: fadeAnim }]}>
+              {todayPickup ? (
+                <>
+                  <View style={styles.pickupHeader}>
+                    <View
+                      style={[
+                        styles.statusBadge,
+                        {
+                          backgroundColor: getStatusBgColor(todayPickup.status),
+                        },
+                      ]}
+                    >
+                      <View
+                        style={[
+                          styles.statusDot,
+                          {
+                            backgroundColor: getStatusColor(todayPickup.status),
+                          },
+                        ]}
+                      />
+                      <Text
+                        style={[
+                          styles.statusText,
+                          { color: getStatusColor(todayPickup.status) },
+                        ]}
+                      >
+                        {todayPickup.status}
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={20} color="#999" />
+                  </View>
+
+                  <View style={styles.pickupDetails}>
+                    {todayPickup.plateNumber && (
+                      <View style={styles.pickupDetailItem}>
+                        <Ionicons name="car" size={18} color="#666" />
+                        <Text style={styles.pickupDetailText}>
+                          {todayPickup.plateNumber}
+                        </Text>
+                      </View>
+                    )}
+                    {todayPickup.timeSlot && (
+                      <View style={styles.pickupDetailItem}>
+                        <Ionicons name="time" size={18} color="#666" />
+                        <Text style={styles.pickupDetailText}>
+                          {todayPickup.timeSlot}
+                        </Text>
+                      </View>
+                    )}
+                    <View style={styles.pickupDetailItem}>
+                      <Ionicons name="people" size={18} color="#666" />
+                      <Text style={styles.pickupDetailText}>
+                        {todayPickup.studentCount} student(s)
+                      </Text>
+                    </View>
+                  </View>
+                </>
+              ) : (
+                <View style={styles.noPickupContainer}>
+                  <View style={styles.noPickupIconBg}>
+                    <Ionicons name="calendar-outline" size={32} color="#999" />
+                  </View>
+                  <Text style={styles.noPickupTitle}>No Pickup Queued Yet</Text>
+                  <Text style={styles.noPickupSubtitle}>
+                    Queue a pickup to start your route
+                  </Text>
+                  <View style={styles.queueButtonHint}>
+                    <Text style={styles.queueButtonHintText}>
+                      Tap to queue pickup
+                    </Text>
+                    <Ionicons name="arrow-forward" size={16} color="#67BA03" />
+                  </View>
+                </View>
+              )}
+            </Animated.View>
+          </TouchableOpacity>
+
+          {/* Assigned Students */}
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>My Students</Text>
+            <View style={styles.sectionLine} />
+          </View>
+
+          <TouchableOpacity
+            activeOpacity={0.8}
+            onPress={() => router.push("/pickup")}
+            style={{ marginHorizontal: 20, marginTop: 16 }}
+          >
+            <Animated.View style={[styles.studentsCard, { opacity: fadeAnim }]}>
+              <View style={styles.studentsHeader}>
+                <View style={styles.studentsIconBg}>
+                  <Ionicons name="people" size={24} color="#FF9800" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.studentsTitle}>Assigned Students</Text>
+                  <Text style={styles.studentsSubtitle}>
+                    {students.length} student(s) under your care
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={20} color="#999" />
+              </View>
+
+              {loadingStudents ? (
+                <View style={styles.loadingContainer}>
+                  <ActivityIndicator size="small" color="#FF9800" />
+                </View>
+              ) : (
+                <>
+                  {students.length > 0 ? (
+                    <View style={styles.studentList}>
+                      {students.map((student, index) => (
+                        <View key={student.id}>
+                          <View style={styles.studentItem}>
+                            <View style={styles.studentAvatar}>
+                              {student.ppic ? (
+                                <Image
+                                  source={{ uri: student.ppic }}
+                                  style={styles.studentAvatarImage}
+                                />
+                              ) : (
+                                <Text style={styles.studentAvatarText}>
+                                  {student.name.charAt(0).toUpperCase()}
+                                </Text>
+                              )}
+                            </View>
+                            <View style={{ flex: 1 }}>
+                              <Text style={styles.studentName}>
+                                {student.name}
+                              </Text>
+                              <Text style={styles.studentID}>
+                                ID: {student.studentID}
+                              </Text>
+                              {student.className && (
+                                <Text style={styles.studentClass}>
+                                  Class: {student.className}
+                                </Text>
+                              )}
+                            </View>
+                          </View>
+                          {index < students.length - 1 && (
+                            <View style={styles.studentDivider} />
+                          )}
+                        </View>
+                      ))}
+                    </View>
+                  ) : (
+                    <View style={styles.noDataContainer}>
+                      <Ionicons name="people-outline" size={48} color="#ccc" />
+                      <Text style={styles.noDataText}>
+                        No students assigned yet
+                      </Text>
+                    </View>
+                  )}
+
+                  <View style={styles.studentsFooter}>
+                    <Text style={styles.studentsFooterText}>
+                      Tap to manage pickup schedule
+                    </Text>
+                  </View>
+                </>
+              )}
+            </Animated.View>
+          </TouchableOpacity>
+
+          <View style={{ height: 30 }} />
+        </ScrollView>
+      </View>
+    </>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: "#F5F7FA",
+  },
+  header: {
+    borderBottomLeftRadius: 30,
+    borderBottomRightRadius: 30,
+    paddingVertical: 30,
+    paddingHorizontal: 20,
+    paddingTop: 50,
+    overflow: "hidden",
+    elevation: 8,
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    height: 180,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  circleDecor1: {
+    position: "absolute",
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    backgroundColor: "rgba(255, 255, 255, 0.1)",
+    top: -50,
+    right: -30,
+  },
+  circleDecor2: {
+    position: "absolute",
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: "rgba(255, 255, 255, 0.08)",
+    bottom: -20,
+    left: -20,
+  },
+  circleDecor3: {
+    position: "absolute",
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: "rgba(255, 255, 255, 0.06)",
+    top: 40,
+    left: "50%",
+  },
+  headerContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    zIndex: 1,
+    marginTop: 20,
+  },
+  avatarContainer: {
+    position: "relative",
+  },
+  avatarGlow: {
+    position: "absolute",
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    backgroundColor: "rgba(255, 255, 255, 0.3)",
+    top: -5,
+    left: -5,
+  },
+  avatar: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    borderWidth: 3,
+    borderColor: "#fff",
+    backgroundColor: "#E8F5E9",
+  },
+  onlineIndicator: {
+    position: "absolute",
+    bottom: 2,
+    right: 2,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: "#4CAF50",
+    borderWidth: 2,
+    borderColor: "#fff",
+  },
+  headerTextContainer: {
+    flex: 1,
+    marginLeft: 15,
+  },
+  headerSubtitle: {
+    color: "rgba(255, 255, 255, 0.9)",
+    fontSize: 13,
+    fontWeight: "500",
+  },
+  headerTitle: {
+    color: "#fff",
+    fontSize: 22,
+    fontWeight: "bold",
+    marginTop: 2,
+  },
+  roleBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(255, 255, 255, 0.95)",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginTop: 6,
+    alignSelf: "flex-start",
+    gap: 4,
+  },
+  roleText: {
+    fontSize: 11,
+    color: "#67BA03",
+    fontWeight: "700",
+  },
+  notificationButton: {
+    marginLeft: 10,
+  },
+  notificationIconContainer: {
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    padding: 10,
+    position: "relative",
+    elevation: 3,
+    shadowColor: "#000",
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  notificationBadge: {
+    position: "absolute",
+    top: -4,
+    right: -4,
+    backgroundColor: "#E53935",
+    borderRadius: 10,
+    minWidth: 20,
+    height: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 2,
+    borderColor: "#fff",
+  },
+  notificationBadgeText: {
+    color: "#fff",
+    fontSize: 11,
+    fontWeight: "bold",
+  },
+  sectionHeader: {
+    marginHorizontal: 20,
+    marginTop: 30,
+    marginBottom: 16,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#333",
+    marginBottom: 8,
+  },
+  sectionLine: {
+    width: 40,
+    height: 3,
+    backgroundColor: "#67BA03",
+    borderRadius: 2,
+  },
+  buttonContainer: {
+    marginHorizontal: 20,
+    gap: 16,
+  },
+  actionCard: {
+    borderRadius: 20,
+    overflow: "hidden",
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  actionCardGradient: {
+    borderRadius: 20,
+    overflow: "hidden",
+  },
+  actionCardPattern: {
+    position: "absolute",
+    right: -30,
+    top: -30,
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: "rgba(255, 255, 255, 0.1)",
+  },
+  actionCardContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 20,
+  },
+  actionIconContainer: {
+    marginRight: 16,
+  },
+  actionIconBg: {
+    width: 56,
+    height: 56,
+    borderRadius: 16,
+    backgroundColor: "#fff",
+    alignItems: "center",
+    justifyContent: "center",
+    elevation: 2,
+    shadowColor: "#000",
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  actionTextContainer: {
+    flex: 1,
+  },
+  actionTitle: {
+    fontSize: 17,
+    fontWeight: "bold",
+    color: "#fff",
+    marginBottom: 4,
+  },
+  actionSubtitle: {
+    fontSize: 13,
+    color: "rgba(255, 255, 255, 0.9)",
+    lineHeight: 18,
+  },
+  actionArrow: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "rgba(255, 255, 255, 0.2)",
+    alignItems: "center",
+    justifyContent: "center",
+    marginLeft: 12,
+  },
+  pickupCard: {
+    backgroundColor: "#fff",
+    borderRadius: 20,
+    padding: 20,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    borderWidth: 1,
+    borderColor: "rgba(103, 186, 3, 0.1)",
+  },
+  pickupHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 16,
+  },
+  statusBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    gap: 6,
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  statusText: {
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  pickupDetails: {
+    gap: 10,
+  },
+  pickupDetailItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  pickupDetailText: {
+    fontSize: 14,
+    color: "#666",
+    fontWeight: "500",
+  },
+  noPickupContainer: {
+    alignItems: "center",
+    paddingVertical: 20,
+  },
+  noPickupIconBg: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: "#F5F5F5",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 12,
+  },
+  noPickupTitle: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#333",
+    marginBottom: 4,
+  },
+  noPickupSubtitle: {
+    fontSize: 13,
+    color: "#999",
+    marginBottom: 16,
+  },
+  queueButtonHint: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "#F0F9E8",
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+  },
+  queueButtonHintText: {
+    fontSize: 13,
+    color: "#67BA03",
+    fontWeight: "600",
+  },
+  studentsCard: {
+    backgroundColor: "#fff",
+    borderRadius: 20,
+    padding: 20,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    borderWidth: 1,
+    borderColor: "rgba(255, 152, 0, 0.1)",
+  },
+  studentsHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 16,
+    gap: 12,
+  },
+  studentsIconBg: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    backgroundColor: "#FFF3E0",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  studentsTitle: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: "#333",
+  },
+  studentsSubtitle: {
+    fontSize: 11,
+    color: "#999",
+    marginTop: 2,
+  },
+  loadingContainer: {
+    paddingVertical: 30,
+    alignItems: "center",
+  },
+  studentList: {
+    gap: 0,
+  },
+  studentItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 12,
+    gap: 12,
+  },
+  studentAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: "#FFF3E0",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  studentAvatarImage: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+  },
+  studentAvatarText: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#FF9800",
+  },
+  studentName: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "#333",
+    marginBottom: 2,
+  },
+  studentID: {
+    fontSize: 12,
+    color: "#999",
+  },
+  studentClass: {
+    fontSize: 11,
+    color: "#666",
+    marginTop: 2,
+  },
+  studentDivider: {
+    height: 1,
+    backgroundColor: "#F0F0F0",
+    marginVertical: 0,
+  },
+  noDataContainer: {
+    alignItems: "center",
+    paddingVertical: 40,
+  },
+  noDataText: {
+    fontSize: 14,
+    color: "#999",
+    marginTop: 12,
+  },
+  studentsFooter: {
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: "#F0F0F0",
+    alignItems: "center",
+    marginTop: 12,
+  },
+  studentsFooterText: {
+    fontSize: 12,
+    color: "#FF9800",
+    fontWeight: "500",
+  },
+});

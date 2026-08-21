@@ -1,0 +1,289 @@
+// app/(auth)/loginscreen.tsx
+import { router } from "expo-router";
+import React, { useEffect, useState } from "react";
+import {
+  ActivityIndicator,
+  Alert,
+  Image,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+
+import { initializeApp } from "firebase/app";
+import {
+  getAuth,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+} from "firebase/auth";
+import { getFirestore } from "firebase/firestore";
+
+// Firebase config
+const firebaseConfig = {
+  apiKey: "AIzaSyB_rHt5HtQgk7DhXwAtasFxmlkgbaD_G34",
+  authDomain: "buddywheels-2211719.firebaseapp.com",
+  projectId: "buddywheels-2211719",
+  storageBucket: "buddywheels-2211719.firebasestorage.app",
+  messagingSenderId: "126392678797",
+  appId: "1:126392678797:web:52c63c55e01544df4d65c4",
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const firestore = getFirestore(app);
+
+// @ts-ignore
+const CircularCheckbox = ({ value, onValueChange }) => {
+  return (
+    <TouchableOpacity
+      style={[styles.circle, { borderColor: value ? "#67BA03" : "#A9A9A9" }]}
+      onPress={() => onValueChange(!value)}
+    >
+      {value && <View style={styles.innerCircle} />}
+    </TouchableOpacity>
+  );
+};
+
+export default function LoginScreen() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [isChecked, setChecked] = useState(false);
+  const [emailError, setEmailError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [isCheckingAuth, setIsCheckingAuth] = useState(true);
+
+  // Check if user is already logged in
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        router.replace("/(auth)/loadingscreen");
+      }
+      setIsCheckingAuth(false);
+    });
+
+    return unsubscribe;
+  }, []);
+
+  const validateEmail = (email: string) =>
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
+  const handleLogin = async () => {
+    if (!email || !password) {
+      Alert.alert("Error", "Please fill in all fields");
+      return;
+    }
+
+    if (!validateEmail(email)) {
+      setEmailError("Please enter a valid email address");
+      return;
+    }
+
+    try {
+      setLoading(true);
+      await signInWithEmailAndPassword(auth, email, password);
+      console.log("✅ Login successful!");
+      // Navigate to loading screen which will handle role-based routing
+      router.replace("/(auth)/loadingscreen");
+    } catch (error: any) {
+      console.error("Login error:", error.message);
+      Alert.alert("Login Failed", error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Show loading screen while checking auth state
+  if (isCheckingAuth) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color="#67BA03" />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <View style={styles.logoContainer}>
+        <Image
+          source={require("C:/Users/haika/Documents/IIUM DEGREE/BuddyWheels/buddywheels/assets/images/Logo.png")}
+          style={styles.logo}
+          resizeMode="contain"
+        />
+      </View>
+
+      <Text style={styles.title}>Welcome Back</Text>
+      <Text style={styles.subtitle}>We are happy to see you back again.</Text>
+
+      <TextInput
+        style={[styles.input, emailError ? { borderColor: "red" } : null]}
+        placeholder="Email"
+        value={email}
+        onChangeText={(text) => {
+          setEmail(text);
+          if (!validateEmail(text)) {
+            setEmailError("Please enter a valid email address");
+          } else {
+            setEmailError("");
+          }
+        }}
+        placeholderTextColor="#A9A9A9"
+      />
+      {emailError ? <Text style={styles.errorText}>{emailError}</Text> : null}
+
+      <TextInput
+        style={styles.input}
+        placeholder="Password"
+        value={password}
+        onChangeText={setPassword}
+        placeholderTextColor="#A9A9A9"
+        secureTextEntry
+      />
+
+      <View style={styles.row}>
+        <View style={styles.checkboxContainer}>
+          <CircularCheckbox value={isChecked} onValueChange={setChecked} />
+          <Text style={styles.rememberText}>Remember me</Text>
+        </View>
+
+        <TouchableOpacity onPress={() => router.push("/forgot")}>
+          <Text style={styles.forgotText}>Forgot password?</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Login button */}
+      <TouchableOpacity
+        style={[styles.loginButton, loading && { opacity: 0.6 }]}
+        onPress={handleLogin}
+        disabled={loading}
+      >
+        <Text style={styles.loginText}>
+          {loading ? "Logging in..." : "LOG IN"}
+        </Text>
+      </TouchableOpacity>
+
+      <View style={styles.footer}>
+        <Text style={styles.footerText}>Don't have an account? </Text>
+        <TouchableOpacity onPress={() => router.push("/rolescreen")}>
+          <Text style={styles.signUpText}>Sign Up</Text>
+        </TouchableOpacity>
+      </View>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: "#fff",
+    alignItems: "center",
+    paddingHorizontal: 20,
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  logoContainer: {
+    marginTop: 100,
+    marginBottom: 10,
+    alignItems: "center",
+  },
+  logo: {
+    width: 280,
+    height: 150,
+  },
+  title: {
+    fontSize: 28,
+    fontWeight: "bold",
+    color: "#000",
+    marginTop: 0,
+  },
+  subtitle: {
+    color: "#3B8D33",
+    fontSize: 19,
+    marginTop: 5,
+    marginBottom: 25,
+  },
+  input: {
+    width: "100%",
+    backgroundColor: "#fff",
+    borderWidth: 2,
+    borderColor: "#E0E0E0",
+    borderRadius: 10,
+    paddingVertical: 14,
+    paddingHorizontal: 15,
+    fontSize: 15,
+    marginBottom: 15,
+  },
+  errorText: {
+    color: "red",
+    fontSize: 12,
+    alignSelf: "flex-start",
+    marginTop: -10,
+    marginBottom: 10,
+  },
+  row: {
+    width: "100%",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 25,
+  },
+  checkboxContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  circle: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 6,
+  },
+  innerCircle: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: "#67BA03",
+  },
+  rememberText: {
+    fontSize: 13,
+    color: "#000",
+  },
+  forgotText: {
+    fontSize: 13,
+    color: "#3B8D33",
+  },
+  loginButton: {
+    backgroundColor: "#67BA03",
+    width: "100%",
+    borderRadius: 25,
+    paddingVertical: 16,
+    alignItems: "center",
+  },
+  loginText: {
+    color: "#fff",
+    fontWeight: "bold",
+    fontSize: 16,
+  },
+  footer: {
+    flexDirection: "row",
+    marginTop: 20,
+  },
+  footerText: {
+    fontSize: 13,
+    color: "#000",
+  },
+  signUpText: {
+    fontSize: 13,
+    fontWeight: "bold",
+    color: "#3B8D33",
+  },
+});

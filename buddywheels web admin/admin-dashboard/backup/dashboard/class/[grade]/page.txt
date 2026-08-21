@@ -1,0 +1,253 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
+import {
+  collection,
+  query,
+  where,
+  getDocs,
+  setDoc,
+  doc,
+} from "firebase/firestore";
+import { onAuthStateChanged, signOut } from "firebase/auth";
+import { auth, db } from "@/lib/firebaseConfig";
+import { motion, AnimatePresence } from "framer-motion";
+import { PlusCircle, BookOpen, ChevronDown, ChevronUp } from "lucide-react";
+
+export default function GradeClassPage() {
+  const params = useParams();
+  const grade = params?.grade ? String(params.grade) : "";
+  const router = useRouter();
+
+  const [classes, setClasses] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const [classID, setClassID] = useState("");
+  const [className, setClassName] = useState("");
+  const [studentCount, setStudentCount] = useState("");
+  const [teacherID, setTeacherID] = useState("");
+
+  const [isAddOpen, setIsAddOpen] = useState(false); // ✅ Toggle for collapse
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (!user || user.email !== process.env.NEXT_PUBLIC_ADMIN_EMAIL) {
+        router.push("/");
+      }
+    });
+    return () => unsubscribe();
+  }, [router]);
+
+  const fetchClasses = async () => {
+    if (!grade) return;
+    setLoading(true);
+
+    try {
+      const q = query(
+        collection(db, "classes"),
+        where("grade", "==", Number(grade))
+      );
+      const snapshot = await getDocs(q);
+      const fetched: any[] = [];
+      snapshot.forEach((doc) => fetched.push({ id: doc.id, ...doc.data() }));
+      setClasses(fetched);
+    } catch (err) {
+      console.error("Error fetching classes:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchClasses();
+  }, [grade]);
+
+  const handleAddClass = async () => {
+    if (!classID.trim()) return alert("Please enter a Class ID.");
+    if (!className.trim()) return alert("Please enter a Class Name.");
+
+    const cleanedData = {
+      classID: classID.trim(),
+      className: className.trim(),
+      grade: Number(grade),
+      studentCount: studentCount.trim() ? Number(studentCount) : 0,
+      teacherID: teacherID.trim() || "",
+    };
+
+    await setDoc(doc(db, "classes", cleanedData.classID), cleanedData);
+
+    setClassID("");
+    setClassName("");
+    setStudentCount("");
+    setTeacherID("");
+
+    fetchClasses();
+  };
+
+  const handleLogout = async () => {
+    await signOut(auth);
+    router.push("/");
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-green-100 via-white to-green-50">
+      {/* Header */}
+      <header className="flex justify-between items-center px-8 py-4 bg-white shadow-md sticky top-0 z-40">
+        <div className="flex items-center space-x-3">
+          <img
+            src="/logo.png"
+            alt="BuddyWheels Logo"
+            className="w-30 h-10"
+            onClick={() => router.push("/dashboard")}
+          />
+          <h1 className="text-xl font-semibold text-gray-700">
+            {grade ? `Grade ${grade} - Class Management` : "Loading Grade..."}
+          </h1>
+        </div>
+        <div className="flex items-center space-x-3">
+          <button
+            onClick={() => router.push("/dashboard/class")}
+            className="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300 transition text-gray-700"
+          >
+            ⬅ Back
+          </button>
+          <button
+            onClick={handleLogout}
+            className="bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 active:scale-95 transition"
+          >
+            Logout
+          </button>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="p-10">
+        {/* Title */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
+          className="text-center mb-10"
+        >
+          <div className="flex justify-center mb-4">
+            <BookOpen className="w-10 h-10 text-green-600" />
+          </div>
+          <h2 className="text-3xl font-bold text-green-700">
+            {grade ? `Manage Grade ${grade} Classes` : "Loading..."}
+          </h2>
+          <p className="text-gray-600 mt-2">
+            Add, view, and manage all classes for this grade.
+          </p>
+        </motion.div>
+
+        {/* Add Class Card (Collapsible) */}
+        <div className="max-w-3xl mx-auto bg-white shadow-lg rounded-2xl border border-gray-100 mb-10 overflow-hidden">
+          <button
+            onClick={() => setIsAddOpen(!isAddOpen)}
+            className="w-full flex justify-between items-center p-6 bg-green-50 hover:bg-green-100 transition"
+          >
+            <h3 className="text-xl font-semibold text-green-700 flex items-center">
+              <PlusCircle className="w-6 h-6 mr-2" /> Add a New Class
+            </h3>
+            {isAddOpen ? (
+              <ChevronUp className="w-6 h-6 text-green-600" />
+            ) : (
+              <ChevronDown className="w-6 h-6 text-green-600" />
+            )}
+          </button>
+
+          <AnimatePresence>
+            {isAddOpen && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.4 }}
+                className="p-8 border-t border-gray-100"
+              >
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-6">
+                  <input
+                    type="text"
+                    placeholder="Class ID (e.g. CLS001)"
+                    value={classID}
+                    onChange={(e) => setClassID(e.target.value)}
+                    className="border border-gray-300 rounded-lg p-3 shadow-sm focus:ring-2 focus:ring-green-400 placeholder-gray-400 text-gray-400 italic"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Class Name (e.g. 1A)"
+                    value={className}
+                    onChange={(e) => setClassName(e.target.value)}
+                    className="border border-gray-300 rounded-lg p-3 shadow-sm focus:ring-2 focus:ring-green-400 placeholder-gray-400 text-gray-400 italic"
+                  />
+                  <input
+                    type="number"
+                    placeholder="Student Count"
+                    value={studentCount}
+                    onChange={(e) => setStudentCount(e.target.value)}
+                    className="border border-gray-300 rounded-lg p-3 shadow-sm focus:ring-2 focus:ring-green-400 placeholder-gray-400 text-gray-400 italic"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Teacher ID"
+                    value={teacherID}
+                    onChange={(e) => setTeacherID(e.target.value)}
+                    className="border border-gray-300 rounded-lg p-3 shadow-sm focus:ring-2 focus:ring-green-400 placeholder-gray-400 text-gray-400 italic"
+                  />
+                </div>
+
+                <button
+                  onClick={handleAddClass}
+                  className="w-full flex items-center justify-center bg-green-500 text-white py-3 rounded-lg hover:bg-green-600 active:scale-95 transition"
+                >
+                  <PlusCircle className="w-5 h-5 mr-2" /> Add Class
+                </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+
+        {/* Class List */}
+        {loading ? (
+          <p className="text-center text-gray-500">Loading classes...</p>
+        ) : classes.length === 0 ? (
+          <p className="text-center text-gray-500">
+            No classes found for Grade {grade}.
+          </p>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-8 max-w-5xl mx-auto">
+            {classes.map((cls) => (
+              <motion.div
+                key={cls.id}
+                whileHover={{ scale: 1.03 }}
+                onClick={() =>
+                  router.push(`/dashboard/class/${grade}/${cls.classID}`)
+                }
+                className="cursor-pointer bg-white rounded-2xl p-6 shadow-lg border border-gray-100 hover:shadow-xl transition"
+              >
+                <h3 className="text-xl font-bold text-green-700 mb-2">
+                  {cls.className || "Unnamed Class"}
+                </h3>
+                <p className="text-gray-600 text-sm">
+                  Class ID: {cls.classID || "—"} <br />
+                  Grade: {cls.grade || "—"} <br />
+                  Students: {cls.studentCount ?? "—"} <br />
+                  Teacher ID: {cls.teacherID || "—"}
+                </p>
+              </motion.div>
+            ))}
+          </div>
+        )}
+
+        {/* Footer */}
+        <footer className="text-center text-gray-500 mt-16">
+          <p>
+            © {new Date().getFullYear()} BuddyWheels Admin Panel. All rights
+            reserved.
+          </p>
+        </footer>
+      </main>
+    </div>
+  );
+}

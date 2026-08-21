@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "126392678797",
+    "project_id": "buddywheels-2211719",
+    "storage_bucket": "buddywheels-2211719.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:126392678797:android:e00eacd698073ffc4d65c4",
+        "android_client_info": {
+          "package_name": "com.firebase.buddywheels"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyACuzbtZmozGslRoCw7Jx7h9UbsJTMVAYo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

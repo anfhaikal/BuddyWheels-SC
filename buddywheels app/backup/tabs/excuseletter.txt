@@ -1,0 +1,361 @@
+import { Ionicons } from "@expo/vector-icons";
+import { useRouter } from "expo-router";
+import { getAuth } from "firebase/auth";
+import {
+  collection,
+  doc,
+  getDoc,
+  onSnapshot,
+  query,
+  where,
+} from "firebase/firestore";
+import React, { useEffect, useState } from "react";
+import {
+  ActivityIndicator,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { db } from "../../firebaseConfig";
+
+type ClassInfo = {
+  classID: string;
+  grade: number;
+  className: string;
+  pendingCount: number;
+};
+
+export default function ExcuseLetterClassSelector() {
+  const router = useRouter();
+  const [loading, setLoading] = useState(true);
+  const [classes, setClasses] = useState<ClassInfo[]>([]);
+  const auth = getAuth();
+  const currentUser = auth.currentUser;
+
+  useEffect(() => {
+    if (!currentUser) {
+      console.log("❌ No user logged in");
+      setLoading(false);
+      return;
+    }
+
+    let unsubscribeClasses: (() => void) | undefined;
+    let excuseUnsubscribers: (() => void)[] = [];
+
+    const setupRealtimeListeners = async () => {
+      try {
+        // Step 1: Get teacher's ID from users collection
+        const userDocRef = doc(db, "users", currentUser.uid);
+        const userDocSnap = await getDoc(userDocRef);
+
+        if (!userDocSnap.exists()) {
+          console.log("❌ No user document found");
+          setLoading(false);
+          return;
+        }
+
+        const userData = userDocSnap.data();
+        const teacherID = userData.id;
+
+        console.log("👨‍🏫 Teacher ID:", teacherID);
+
+        // Step 2: Set up real-time listener for classes
+        const classQuery = query(
+          collection(db, "classes"),
+          where("teacherID", "==", teacherID)
+        );
+
+        unsubscribeClasses = onSnapshot(classQuery, (classSnapshot) => {
+          console.log(`📚 Found ${classSnapshot.size} classes`);
+
+          // Clean up previous excuse letter listeners
+          excuseUnsubscribers.forEach((unsub) => unsub());
+          excuseUnsubscribers = [];
+
+          const classDataList = classSnapshot.docs.map((doc) => ({
+            classID: doc.data().classID,
+            grade: doc.data().grade,
+            className: doc.data().className,
+          }));
+
+          // Step 3: For each class, set up real-time listener for pending excuse letters
+          const tempClasses: ClassInfo[] = [];
+          const pendingCounts: Record<string, number> = {};
+
+          classDataList.forEach((classData) => {
+            const excuseQuery = query(
+              collection(db, "excuseLetter"),
+              where("classID", "==", classData.classID),
+              where("status", "==", "Pending")
+            );
+
+            const unsubExcuse = onSnapshot(excuseQuery, (excuseSnapshot) => {
+              // Update pending count for this class
+              pendingCounts[classData.classID] = excuseSnapshot.size;
+
+              console.log(
+                `📬 Class ${classData.classID}: ${excuseSnapshot.size} pending letters`
+              );
+
+              // Rebuild the classes array with updated counts
+              const updatedClasses = classDataList.map((cls) => ({
+                classID: cls.classID,
+                grade: cls.grade,
+                className: cls.className,
+                pendingCount: pendingCounts[cls.classID] || 0,
+              }));
+
+              setClasses(updatedClasses);
+              setLoading(false);
+            });
+
+            excuseUnsubscribers.push(unsubExcuse);
+          });
+
+          // If no classes, set loading to false
+          if (classDataList.length === 0) {
+            setClasses([]);
+            setLoading(false);
+          }
+        });
+      } catch (error) {
+        console.error("❌ Error setting up listeners:", error);
+        setLoading(false);
+      }
+    };
+
+    setupRealtimeListeners();
+
+    // Cleanup function
+    return () => {
+      if (unsubscribeClasses) {
+        unsubscribeClasses();
+      }
+      excuseUnsubscribers.forEach((unsub) => unsub());
+    };
+  }, [currentUser]);
+
+  const navigateToDashboard = (classID: string) => {
+    router.push(`/(tabs)/excuseLetter/${classID}/page`);
+  };
+
+  if (loading) {
+    return (
+      <>
+        <StatusBar
+          backgroundColor="#67BA03"
+          barStyle="light-content"
+          translucent={false}
+        />
+        <SafeAreaView style={styles.container} edges={["top"]}>
+          <View style={styles.header}>
+            <TouchableOpacity onPress={() => router.back()}>
+              <Ionicons name="arrow-back" size={22} color="#67BA03" />
+            </TouchableOpacity>
+            <Text style={styles.headerText}>Excuse Letters</Text>
+            <View style={{ width: 22 }} />
+          </View>
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#67BA03" />
+            <Text style={styles.loadingText}>Loading classes...</Text>
+          </View>
+        </SafeAreaView>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <StatusBar
+        backgroundColor="#67BA03"
+        barStyle="light-content"
+        translucent={false}
+      />
+      <SafeAreaView style={styles.container} edges={["top"]}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => router.back()}>
+            <Ionicons name="arrow-back" size={22} color="#67BA03" />
+          </TouchableOpacity>
+          <Text style={styles.headerText}>Excuse Letters</Text>
+          <View style={{ width: 22 }} />
+        </View>
+
+        <ScrollView style={styles.content}>
+          <View style={styles.infoCard}>
+            <Ionicons name="information-circle" size={24} color="#67BA03" />
+            <Text style={styles.infoText}>
+              Select a class to view and manage excuse letters
+            </Text>
+          </View>
+
+          {classes.length === 0 ? (
+            <View style={styles.emptyContainer}>
+              <Ionicons name="school-outline" size={64} color="#CCC" />
+              <Text style={styles.emptyText}>No classes assigned</Text>
+              <Text style={styles.emptySubtext}>
+                You don't have any classes assigned yet
+              </Text>
+            </View>
+          ) : (
+            classes.map((classInfo) => (
+              <TouchableOpacity
+                key={classInfo.classID}
+                style={styles.classCard}
+                onPress={() => navigateToDashboard(classInfo.classID)}
+              >
+                <View style={styles.classIconContainer}>
+                  <Ionicons name="book" size={32} color="#67BA03" />
+                </View>
+
+                <View style={styles.classInfo}>
+                  <Text style={styles.className}>
+                    {classInfo.grade} {classInfo.className}
+                  </Text>
+                  <Text style={styles.classID}>
+                    Class ID: {classInfo.classID}
+                  </Text>
+                </View>
+
+                <View style={styles.badgeContainer}>
+                  {classInfo.pendingCount > 0 && (
+                    <View style={styles.pendingBadge}>
+                      <Text style={styles.badgeText}>
+                        {classInfo.pendingCount}
+                      </Text>
+                    </View>
+                  )}
+                  <Ionicons name="chevron-forward" size={20} color="#999" />
+                </View>
+              </TouchableOpacity>
+            ))
+          )}
+        </ScrollView>
+      </SafeAreaView>
+    </>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: "#67BA03",
+  },
+  header: {
+    backgroundColor: "#67BA03",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 22,
+    paddingHorizontal: 20,
+  },
+  headerText: {
+    color: "#fff",
+    fontSize: 20,
+    fontWeight: "bold",
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  loadingText: {
+    marginTop: 10,
+    color: "#666",
+    fontSize: 14,
+  },
+  content: {
+    flex: 1,
+    padding: 16,
+    backgroundColor: "#F7F8FA",
+  },
+  infoCard: {
+    backgroundColor: "#E8F8E0",
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 16,
+    borderRadius: 12,
+    marginBottom: 16,
+    gap: 12,
+    borderWidth: 1,
+    borderColor: "#C8E6C9",
+  },
+  infoText: {
+    flex: 1,
+    fontSize: 14,
+    color: "#2E7D32",
+    fontWeight: "500",
+  },
+  emptyContainer: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 60,
+  },
+  emptyText: {
+    marginTop: 16,
+    color: "#999",
+    fontSize: 16,
+    fontWeight: "600",
+  },
+  emptySubtext: {
+    marginTop: 8,
+    color: "#BBB",
+    fontSize: 14,
+  },
+  classCard: {
+    backgroundColor: "#fff",
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 16,
+    borderRadius: 12,
+    marginBottom: 12,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  classIconContainer: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: "#E8F8E0",
+    justifyContent: "center",
+    alignItems: "center",
+    marginRight: 16,
+  },
+  classInfo: {
+    flex: 1,
+  },
+  className: {
+    fontSize: 16,
+    fontWeight: "bold",
+    color: "#333",
+    marginBottom: 4,
+  },
+  classID: {
+    fontSize: 12,
+    color: "#666",
+  },
+  badgeContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  pendingBadge: {
+    backgroundColor: "#FF9800",
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    minWidth: 24,
+    alignItems: "center",
+  },
+  badgeText: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "bold",
+  },
+});

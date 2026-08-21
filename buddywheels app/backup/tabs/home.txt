@@ -1,0 +1,391 @@
+import { Ionicons } from "@expo/vector-icons";
+import { useRouter } from "expo-router";
+import {
+  collection,
+  getDocs,
+  onSnapshot,
+  query,
+  where,
+} from "firebase/firestore";
+import { useEffect, useState } from "react";
+import {
+  ActivityIndicator,
+  Alert,
+  ImageBackground,
+  Modal,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+//@ts-ignore
+import { auth, db } from "../../firebaseConfig";
+
+type ClassData = {
+  classID: string;
+  grade: number;
+  className: string;
+  teacherID: string;
+  fullName?: string;
+  studentCount: number;
+};
+
+export default function HomeScreen() {
+  const [classes, setClasses] = useState<ClassData[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [teacherID, setTeacherID] = useState<string>("");
+  const [selectedClassMenu, setSelectedClassMenu] = useState<string | null>(
+    null
+  );
+  const router = useRouter();
+
+  useEffect(() => {
+    fetchCurrentTeacher();
+  }, []);
+
+  // Real-time listener for classes
+  useEffect(() => {
+    if (!teacherID) return;
+
+    setLoading(true);
+
+    const classesQuery = query(
+      collection(db, "classes"),
+      where("teacherID", "==", teacherID)
+    );
+
+    const unsubscribe = onSnapshot(
+      classesQuery,
+      async (classesSnapshot) => {
+        try {
+          const classesData: ClassData[] = await Promise.all(
+            classesSnapshot.docs.map(async (doc) => {
+              const data = doc.data();
+
+              let fullName = "";
+              if (data.teacherID) {
+                const teacherQuery = query(
+                  collection(db, "Teacher"),
+                  where("id", "==", data.teacherID)
+                );
+                const teacherSnapshot = await getDocs(teacherQuery);
+                if (!teacherSnapshot.empty) {
+                  fullName = teacherSnapshot.docs[0].data().fullName || "";
+                }
+              }
+
+              return {
+                classID: data.classID,
+                grade: data.grade,
+                className: data.className,
+                teacherID: data.teacherID,
+                fullName,
+                studentCount: data.studentCount || 0,
+              };
+            })
+          );
+
+          setClasses(classesData);
+          setLoading(false);
+        } catch (error) {
+          console.error("Error processing classes:", error);
+          Alert.alert("Error", "Failed to load classes");
+          setLoading(false);
+        }
+      },
+      (error) => {
+        console.error("Error fetching classes:", error);
+        Alert.alert("Error", "Failed to load classes");
+        setLoading(false);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [teacherID]);
+
+  const fetchCurrentTeacher = async () => {
+    try {
+      //@ts-ignore
+      const user = auth.currentUser;
+      if (user && user.email) {
+        const teacherQuery = query(
+          collection(db, "Teacher"),
+          where("email", "==", user.email)
+        );
+        const teacherSnapshot = await getDocs(teacherQuery);
+
+        if (!teacherSnapshot.empty) {
+          const teacherData = teacherSnapshot.docs[0].data();
+          setTeacherID(teacherData.id);
+        } else {
+          Alert.alert("Error", "Teacher profile not found");
+          setLoading(false);
+        }
+      } else {
+        Alert.alert("Error", "No user logged in or email not available");
+        setLoading(false);
+      }
+    } catch (error) {
+      console.error("Error fetching teacher:", error);
+      Alert.alert("Error", "Failed to load teacher profile");
+      setLoading(false);
+    }
+  };
+
+  const fetchClasses = async () => {
+    try {
+      setLoading(true);
+
+      const classesQuery = query(
+        collection(db, "classes"),
+        where("teacherID", "==", teacherID)
+      );
+      const classesSnapshot = await getDocs(classesQuery);
+
+      const classesData: ClassData[] = await Promise.all(
+        classesSnapshot.docs.map(async (doc) => {
+          const data = doc.data();
+
+          let fullName = "";
+          if (data.teacherID) {
+            const teacherQuery = query(
+              collection(db, "Teacher"),
+              where("id", "==", data.teacherID)
+            );
+            const teacherSnapshot = await getDocs(teacherQuery);
+            if (!teacherSnapshot.empty) {
+              fullName = teacherSnapshot.docs[0].data().fullName || "";
+            }
+          }
+
+          return {
+            classID: data.classID,
+            grade: data.grade,
+            className: data.className,
+            teacherID: data.teacherID,
+            fullName,
+            studentCount: data.studentCount || 0,
+          };
+        })
+      );
+
+      setClasses(classesData);
+    } catch (error) {
+      console.error("Error fetching classes:", error);
+      Alert.alert("Error", "Failed to load classes");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await fetchClasses();
+    setRefreshing(false);
+  };
+
+  const openAnalytics = (classID: string) => {
+    setSelectedClassMenu(null);
+    router.push({
+      pathname: "/(tabs)/analytics/[classID]/page",
+      params: { classID },
+    });
+  };
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <View style={styles.header}>
+        <Text style={styles.headerText}>My Classes</Text>
+      </View>
+
+      <ScrollView
+        contentContainerStyle={styles.content}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            colors={["#67BA03"]}
+            tintColor="#67BA03"
+          />
+        }
+      >
+        {loading ? (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#67BA03" />
+            <Text style={styles.loadingText}>Loading classes...</Text>
+          </View>
+        ) : classes.length === 0 ? (
+          <View style={styles.emptyContainer}>
+            <Ionicons name="school-outline" size={64} color="#CCC" />
+            <Text style={styles.emptyText}>No classes found</Text>
+          </View>
+        ) : (
+          classes.map((classItem) => (
+            <View key={classItem.classID} style={styles.cardWrapper}>
+              <TouchableOpacity
+                style={{ flex: 1 }}
+                activeOpacity={0.9}
+                onPress={() =>
+                  router.push({
+                    pathname: "/(tabs)/[classID]/page",
+                    params: { classID: classItem.classID },
+                  })
+                }
+              >
+                <ImageBackground
+                  source={require("../../assets/images/card.png")}
+                  style={styles.classCard}
+                  imageStyle={styles.cardImage}
+                >
+                  <View style={styles.classInfo}>
+                    <Text style={styles.classTitle}>
+                      {classItem.grade} {classItem.className}
+                    </Text>
+                    <Text style={styles.classSubtitle}>
+                      Class Teacher: {classItem.fullName || classItem.teacherID}
+                    </Text>
+                  </View>
+
+                  <View style={styles.studentInfo}>
+                    <Text style={styles.studentLabel}>STUDENTS</Text>
+                    <Text style={styles.studentCount}>
+                      {classItem.studentCount}
+                    </Text>
+                    <Ionicons name="chevron-forward" size={18} color="#fff" />
+                  </View>
+                </ImageBackground>
+              </TouchableOpacity>
+
+              {/* Three Dot Menu Button */}
+              <TouchableOpacity
+                style={styles.menuButton}
+                onPress={() => setSelectedClassMenu(classItem.classID)}
+              >
+                <Ionicons name="ellipsis-vertical" size={20} color="#fff" />
+              </TouchableOpacity>
+
+              {/* Menu Modal */}
+              <Modal
+                visible={selectedClassMenu === classItem.classID}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setSelectedClassMenu(null)}
+              >
+                <TouchableOpacity
+                  style={styles.modalOverlay}
+                  activeOpacity={1}
+                  onPress={() => setSelectedClassMenu(null)}
+                >
+                  <View style={styles.menuContainer}>
+                    <TouchableOpacity
+                      style={styles.menuItem}
+                      onPress={() => openAnalytics(classItem.classID)}
+                    >
+                      <Ionicons
+                        name="analytics-outline"
+                        size={22}
+                        color="#67BA03"
+                      />
+                      <Text style={styles.menuText}>Report/Analytics</Text>
+                    </TouchableOpacity>
+                  </View>
+                </TouchableOpacity>
+              </Modal>
+            </View>
+          ))
+        )}
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: "#F5F5F5" },
+  header: {
+    backgroundColor: "#67BA03",
+    paddingVertical: 22,
+    paddingHorizontal: 20,
+    alignItems: "center",
+  },
+  headerText: { color: "#fff", fontSize: 20, fontWeight: "bold" },
+  content: { padding: 16 },
+  loadingContainer: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 50,
+  },
+  loadingText: { marginTop: 10, color: "#666", fontSize: 14 },
+  emptyContainer: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 50,
+  },
+  emptyText: { marginTop: 16, color: "#999", fontSize: 16 },
+  cardWrapper: {
+    borderRadius: 14,
+    overflow: "hidden",
+    marginBottom: 16,
+    position: "relative",
+  },
+  classCard: {
+    borderRadius: 14,
+    padding: 30,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    overflow: "hidden",
+  },
+  cardImage: { borderRadius: 14 },
+  classInfo: { flex: 1 },
+  classTitle: { color: "#fff", fontSize: 18, fontWeight: "bold" },
+  classSubtitle: { color: "#fff", marginTop: 4, fontSize: 13 },
+  studentInfo: { alignItems: "center" },
+  studentLabel: { color: "#fff", fontSize: 12, letterSpacing: 1 },
+  studentCount: {
+    color: "#fff",
+    fontSize: 22,
+    fontWeight: "bold",
+    marginVertical: 2,
+  },
+  menuButton: {
+    position: "absolute",
+    top: 10,
+    right: 10,
+    backgroundColor: "rgba(0,0,0,0.3)",
+    borderRadius: 20,
+    padding: 8,
+    zIndex: 10,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  menuContainer: {
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    padding: 8,
+    minWidth: 200,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+  },
+  menuItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 16,
+    gap: 12,
+  },
+  menuText: {
+    fontSize: 16,
+    color: "#333",
+    fontWeight: "500",
+  },
+});

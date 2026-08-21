@@ -1,0 +1,1101 @@
+import { Ionicons } from "@expo/vector-icons";
+import { LinearGradient } from "expo-linear-gradient";
+import { useLocalSearchParams, useRouter } from "expo-router";
+import {
+  collection,
+  getDocs,
+  onSnapshot,
+  query,
+  where,
+} from "firebase/firestore";
+
+import { useFocusEffect } from "@react-navigation/native";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+
+import {
+  ActivityIndicator,
+  Animated,
+  Dimensions,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import { LineChart, PieChart } from "react-native-chart-kit";
+import { db } from "../../../../firebaseConfig";
+
+type AttendanceRecord = {
+  date: string;
+  studentID: string;
+  status: number;
+};
+
+type ClassInfo = {
+  grade: number;
+  className: string;
+  teacherName: string;
+  studentCount: number;
+};
+
+type StudentAttendance = {
+  studentID: string;
+  name: string;
+  presentCount: number;
+  absentCount: number;
+  attendanceRate: number;
+};
+
+export default function AnalyticsScreen() {
+  const { classID } = useLocalSearchParams();
+  const router = useRouter();
+  const scrollViewRef = useRef<ScrollView>(null);
+  const [loading, setLoading] = useState(true);
+  const [classInfo, setClassInfo] = useState<ClassInfo | null>(null);
+  const [selectedMonth, setSelectedMonth] = useState(new Date());
+  const [attendanceRecords, setAttendanceRecords] = useState<
+    AttendanceRecord[]
+  >([]);
+  const [studentAttendance, setStudentAttendance] = useState<
+    StudentAttendance[]
+  >([]);
+  const [dailyStats, setDailyStats] = useState<
+    { date: string; present: number; absent: number }[]
+  >([]);
+
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const slideAnim = useRef(new Animated.Value(50)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 600,
+        useNativeDriver: true,
+      }),
+      Animated.timing(slideAnim, {
+        toValue: 0,
+        duration: 600,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, []);
+
+  useEffect(() => {
+    if (classID) {
+      const unsubscribe = fetchAnalyticsData();
+
+      return () => {
+        if (unsubscribe) {
+          unsubscribe();
+        }
+      };
+    }
+  }, [classID, selectedMonth]);
+
+  useFocusEffect(
+    useCallback(() => {
+      scrollViewRef.current?.scrollTo({ y: 0, animated: false });
+    }, [])
+  );
+
+  const fetchAnalyticsData = () => {
+    try {
+      setLoading(true);
+
+      const startDate = new Date(
+        selectedMonth.getFullYear(),
+        selectedMonth.getMonth(),
+        1
+      );
+      const endDate = new Date(
+        selectedMonth.getFullYear(),
+        selectedMonth.getMonth() + 1,
+        0
+      );
+      const startStr = formatDateString(startDate);
+      const endStr = formatDateString(endDate);
+
+      const classQuery = query(
+        collection(db, "classes"),
+        where("classID", "==", classID)
+      );
+      getDocs(classQuery).then((classSnapshot) => {
+        if (!classSnapshot.empty) {
+          const classData = classSnapshot.docs[0].data();
+
+          let teacherName = "No teacher assigned";
+          if (classData.teacherID) {
+            const teacherQuery = query(
+              collection(db, "Teacher"),
+              where("id", "==", classData.teacherID)
+            );
+            getDocs(teacherQuery).then((teacherSnapshot) => {
+              if (!teacherSnapshot.empty) {
+                teacherName =
+                  teacherSnapshot.docs[0].data().fullName || "Unknown";
+              }
+              setClassInfo({
+                grade: classData.grade,
+                className: classData.className,
+                teacherName,
+                studentCount: classData.studentCount || 0,
+              });
+            });
+          } else {
+            setClassInfo({
+              grade: classData.grade,
+              className: classData.className,
+              teacherName,
+              studentCount: classData.studentCount || 0,
+            });
+          }
+        }
+      });
+
+      const attendanceQuery = query(
+        collection(db, "attendance"),
+        where("classID", "==", classID),
+        where("date", ">=", startStr),
+        where("date", "<=", endStr)
+      );
+
+      const unsubscribeAttendance = onSnapshot(
+        attendanceQuery,
+        (attendanceSnapshot) => {
+          const records: AttendanceRecord[] = [];
+          attendanceSnapshot.forEach((doc) => {
+            const data = doc.data();
+            if (!isWeekend(data.date)) {
+              records.push({
+                date: data.date,
+                studentID: data.studentID,
+                status: data.status,
+              });
+            }
+          });
+
+          setAttendanceRecords(records);
+
+          const studentQuery = query(
+            collection(db, "students"),
+            where("classID", "==", classID)
+          );
+
+          getDocs(studentQuery).then((studentSnapshot) => {
+            const studentStats: StudentAttendance[] = [];
+            studentSnapshot.forEach((doc) => {
+              const studentData = doc.data();
+              const studentRecords = records.filter(
+                (r) => r.studentID === studentData.studentID
+              );
+              const presentCount = studentRecords.filter(
+                (r) => r.status === 1
+              ).length;
+              const absentCount = studentRecords.filter(
+                (r) => r.status === 0
+              ).length;
+              const totalDays = presentCount + absentCount;
+              const attendanceRate =
+                totalDays > 0 ? (presentCount / totalDays) * 100 : 0;
+
+              studentStats.push({
+                studentID: studentData.studentID,
+                name: studentData.name,
+                presentCount,
+                absentCount,
+                attendanceRate,
+              });
+            });
+
+            studentStats.sort((a, b) => a.attendanceRate - b.attendanceRate);
+            setStudentAttendance(studentStats);
+
+            const dailyMap = new Map<
+              string,
+              { present: number; absent: number }
+            >();
+            records.forEach((record) => {
+              const existing = dailyMap.get(record.date) || {
+                present: 0,
+                absent: 0,
+              };
+              if (record.status === 1) {
+                existing.present++;
+              } else {
+                existing.absent++;
+              }
+              dailyMap.set(record.date, existing);
+            });
+
+            const daily = Array.from(dailyMap.entries())
+              .map(([date, stats]) => ({ date, ...stats }))
+              .sort((a, b) => a.date.localeCompare(b.date));
+
+            setDailyStats(daily);
+            setLoading(false);
+          });
+        },
+        (error) => {
+          console.error("Error fetching attendance:", error);
+          setLoading(false);
+        }
+      );
+
+      return unsubscribeAttendance;
+    } catch (error) {
+      console.error("Error setting up analytics:", error);
+      setLoading(false);
+      return undefined;
+    }
+  };
+
+  const formatDateString = (date: Date): string => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  };
+
+  const isWeekend = (dateString: string): boolean => {
+    const date = new Date(dateString);
+    const day = date.getDay();
+    return day === 0 || day === 6;
+  };
+
+  const changeMonth = (direction: number) => {
+    const newDate = new Date(selectedMonth);
+    newDate.setMonth(newDate.getMonth() + direction);
+    setSelectedMonth(newDate);
+  };
+
+  const formatMonthYear = (date: Date) => {
+    return date.toLocaleDateString("en-MY", {
+      month: "long",
+      year: "numeric",
+    });
+  };
+
+  const totalPresent = attendanceRecords.filter((r) => r.status === 1).length;
+  const totalAbsent = attendanceRecords.filter((r) => r.status === 0).length;
+  const overallRate =
+    totalPresent + totalAbsent > 0
+      ? ((totalPresent / (totalPresent + totalAbsent)) * 100).toFixed(1)
+      : "0";
+
+  const lowAttendanceStudents = studentAttendance.filter(
+    (s) => s.attendanceRate < 75
+  );
+
+  const perfectAttendanceStudents = studentAttendance.filter(
+    (s) => s.attendanceRate === 100 && s.presentCount > 0
+  );
+
+  const screenWidth = Dimensions.get("window").width;
+
+  const pieData = [
+    {
+      name: "Present",
+      population: totalPresent,
+      color: "#4CAF50",
+      legendFontColor: "#333",
+      legendFontSize: 12,
+    },
+    {
+      name: "Absent",
+      population: totalAbsent,
+      color: "#E53935",
+      legendFontColor: "#333",
+      legendFontSize: 12,
+    },
+  ];
+
+  const lineData = {
+    labels: dailyStats.slice(-7).map((d) => {
+      const date = new Date(d.date);
+      return date.getDate().toString();
+    }),
+    datasets: [
+      {
+        data: dailyStats.slice(-7).map((d) => d.present),
+        color: (opacity = 1) => `rgba(76, 175, 80, ${opacity})`,
+        strokeWidth: 2,
+      },
+    ],
+    legend: ["Present Students (Last 7 Days)"],
+  };
+
+  if (loading) {
+    return (
+      <>
+        <StatusBar backgroundColor="#67BA03" barStyle="light-content" />
+        <View style={styles.container}>
+          <LinearGradient
+            colors={["#67BA03", "#5AA002", "#4D8902"]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.header}
+          >
+            <View style={styles.circleDecor1} />
+            <View style={styles.circleDecor2} />
+            <View style={styles.headerContent}>
+              <TouchableOpacity
+                onPress={() => router.back()}
+                style={styles.backButton}
+              >
+                <Ionicons name="arrow-back" size={24} color="#fff" />
+              </TouchableOpacity>
+              <Text style={styles.headerTitle}>Analytics</Text>
+              <View style={styles.headerPlaceholder} />
+            </View>
+          </LinearGradient>
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#67BA03" />
+            <Text style={styles.loadingText}>Loading analytics...</Text>
+          </View>
+        </View>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <StatusBar backgroundColor="#67BA03" barStyle="light-content" />
+      <View style={styles.container}>
+        <LinearGradient
+          colors={["#67BA03", "#5AA002", "#4D8902"]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.header}
+        >
+          <View style={styles.circleDecor1} />
+          <View style={styles.circleDecor2} />
+          <View style={styles.headerContent}>
+            <TouchableOpacity
+              onPress={() => router.back()}
+              style={styles.backButton}
+            >
+              <Ionicons name="arrow-back" size={24} color="#fff" />
+            </TouchableOpacity>
+            <Text style={styles.headerTitle}>Analytics & Report</Text>
+            <View style={styles.headerPlaceholder} />
+          </View>
+        </LinearGradient>
+
+        <ScrollView
+          ref={scrollViewRef}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.scrollContent}
+        >
+          {/* Class Info */}
+          <Animated.View
+            style={[
+              styles.classInfoCard,
+              {
+                opacity: fadeAnim,
+                transform: [{ translateY: slideAnim }],
+              },
+            ]}
+          >
+            <View style={styles.classIconBg}>
+              <Ionicons name="school" size={32} color="#67BA03" />
+            </View>
+            <View style={styles.classInfoContent}>
+              <Text style={styles.className}>
+                {classInfo?.grade} {classInfo?.className}
+              </Text>
+              <View style={styles.classDetail}>
+                <Ionicons name="person" size={16} color="#999" />
+                <Text style={styles.classDetailText}>
+                  {classInfo?.teacherName}
+                </Text>
+              </View>
+              <View style={styles.classDetail}>
+                <Ionicons name="people" size={16} color="#999" />
+                <Text style={styles.classDetailText}>
+                  {classInfo?.studentCount} Students
+                </Text>
+              </View>
+            </View>
+          </Animated.View>
+
+          {/* Month Selector */}
+          <Animated.View
+            style={[
+              styles.monthSelector,
+              {
+                opacity: fadeAnim,
+                transform: [{ translateY: slideAnim }],
+              },
+            ]}
+          >
+            <TouchableOpacity
+              onPress={() => changeMonth(-1)}
+              style={styles.monthArrow}
+            >
+              <Ionicons name="chevron-back" size={24} color="#67BA03" />
+            </TouchableOpacity>
+            <View style={styles.monthInfo}>
+              <Ionicons name="calendar" size={20} color="#67BA03" />
+              <Text style={styles.monthText}>
+                {formatMonthYear(selectedMonth)}
+              </Text>
+            </View>
+            <TouchableOpacity
+              onPress={() => changeMonth(1)}
+              style={styles.monthArrow}
+            >
+              <Ionicons name="chevron-forward" size={24} color="#67BA03" />
+            </TouchableOpacity>
+          </Animated.View>
+
+          {/* Overall Statistics */}
+          <View style={styles.statsContainer}>
+            <Animated.View
+              style={[
+                styles.statCard,
+                { backgroundColor: "#E8F5E9" },
+                {
+                  opacity: fadeAnim,
+                  transform: [{ translateY: slideAnim }],
+                },
+              ]}
+            >
+              <View style={styles.statIconBg}>
+                <Ionicons name="checkmark-circle" size={28} color="#4CAF50" />
+              </View>
+              <Text style={[styles.statValue, { color: "#4CAF50" }]}>
+                {totalPresent}
+              </Text>
+              <Text style={styles.statLabel}>Present</Text>
+            </Animated.View>
+
+            <Animated.View
+              style={[
+                styles.statCard,
+                { backgroundColor: "#FFEBEE" },
+                {
+                  opacity: fadeAnim,
+                  transform: [{ translateY: slideAnim }],
+                },
+              ]}
+            >
+              <View style={styles.statIconBg}>
+                <Ionicons name="close-circle" size={28} color="#E53935" />
+              </View>
+              <Text style={[styles.statValue, { color: "#E53935" }]}>
+                {totalAbsent}
+              </Text>
+              <Text style={styles.statLabel}>Absent</Text>
+            </Animated.View>
+
+            <Animated.View
+              style={[
+                styles.statCard,
+                { backgroundColor: "#FFF3E0" },
+                {
+                  opacity: fadeAnim,
+                  transform: [{ translateY: slideAnim }],
+                },
+              ]}
+            >
+              <View style={styles.statIconBg}>
+                <Ionicons name="stats-chart" size={28} color="#FF9800" />
+              </View>
+              <Text style={[styles.statValue, { color: "#FF9800" }]}>
+                {overallRate}%
+              </Text>
+              <Text style={styles.statLabel}>Rate</Text>
+            </Animated.View>
+          </View>
+
+          {/* Pie Chart */}
+          {(totalPresent > 0 || totalAbsent > 0) && (
+            <Animated.View
+              style={[
+                styles.chartCard,
+                {
+                  opacity: fadeAnim,
+                  transform: [{ translateY: slideAnim }],
+                },
+              ]}
+            >
+              <View style={styles.chartHeader}>
+                <View style={styles.chartIconBg}>
+                  <Ionicons name="pie-chart" size={24} color="#2196F3" />
+                </View>
+                <Text style={styles.chartTitle}>Attendance Distribution</Text>
+              </View>
+              <PieChart
+                data={pieData}
+                width={screenWidth - 80}
+                height={220}
+                chartConfig={{
+                  color: (opacity = 1) => `rgba(0, 0, 0, ${opacity})`,
+                }}
+                accessor="population"
+                backgroundColor="transparent"
+                paddingLeft="15"
+                absolute
+              />
+            </Animated.View>
+          )}
+
+          {/* Line Chart */}
+          {dailyStats.length > 0 && (
+            <Animated.View
+              style={[
+                styles.chartCard,
+                {
+                  opacity: fadeAnim,
+                  transform: [{ translateY: slideAnim }],
+                },
+              ]}
+            >
+              <View style={styles.chartHeader}>
+                <View style={styles.chartIconBg}>
+                  <Ionicons name="trending-up" size={24} color="#4CAF50" />
+                </View>
+                <Text style={styles.chartTitle}>7-Day Trend</Text>
+              </View>
+              <LineChart
+                data={lineData}
+                width={screenWidth - 80}
+                height={220}
+                chartConfig={{
+                  backgroundColor: "#fff",
+                  backgroundGradientFrom: "#fff",
+                  backgroundGradientTo: "#fff",
+                  decimalPlaces: 0,
+                  color: (opacity = 1) => `rgba(103, 186, 3, ${opacity})`,
+                  labelColor: (opacity = 1) => `rgba(0, 0, 0, ${opacity})`,
+                  style: { borderRadius: 16 },
+                  propsForDots: {
+                    r: "6",
+                    strokeWidth: "2",
+                    stroke: "#67BA03",
+                  },
+                }}
+                bezier
+                style={styles.chart}
+              />
+            </Animated.View>
+          )}
+
+          {/* Alerts Section */}
+          <Animated.View
+            style={[
+              styles.alertsCard,
+              {
+                opacity: fadeAnim,
+                transform: [{ translateY: slideAnim }],
+              },
+            ]}
+          >
+            <View style={styles.sectionHeader}>
+              <View style={styles.sectionIconBg}>
+                <Ionicons name="notifications" size={20} color="#FF9800" />
+              </View>
+              <Text style={styles.sectionTitle}>Alerts & Highlights</Text>
+            </View>
+
+            {lowAttendanceStudents.length > 0 && (
+              <View style={styles.alertBox}>
+                <View style={styles.alertHeader}>
+                  <Ionicons name="warning" size={20} color="#FF9800" />
+                  <Text style={styles.alertTitle}>Low Attendance</Text>
+                  <View style={styles.alertBadge}>
+                    <Text style={styles.alertBadgeText}>
+                      {lowAttendanceStudents.length}
+                    </Text>
+                  </View>
+                </View>
+                {lowAttendanceStudents.map((student) => (
+                  <View key={student.studentID} style={styles.studentRow}>
+                    <View style={styles.studentIconSmall}>
+                      <Ionicons name="person" size={16} color="#E53935" />
+                    </View>
+                    <Text style={styles.studentName}>{student.name}</Text>
+                    <Text
+                      style={[styles.attendancePercent, { color: "#E53935" }]}
+                    >
+                      {student.attendanceRate.toFixed(1)}%
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            {perfectAttendanceStudents.length > 0 && (
+              <View style={[styles.alertBox, { backgroundColor: "#E8F5E9" }]}>
+                <View style={styles.alertHeader}>
+                  <Ionicons name="trophy" size={20} color="#67BA03" />
+                  <Text style={[styles.alertTitle, { color: "#67BA03" }]}>
+                    Perfect Attendance
+                  </Text>
+                  <View
+                    style={[styles.alertBadge, { backgroundColor: "#67BA03" }]}
+                  >
+                    <Text style={styles.alertBadgeText}>
+                      {perfectAttendanceStudents.length}
+                    </Text>
+                  </View>
+                </View>
+                {perfectAttendanceStudents.map((student) => (
+                  <View key={student.studentID} style={styles.studentRow}>
+                    <View
+                      style={[
+                        styles.studentIconSmall,
+                        { backgroundColor: "#C8E6C9" },
+                      ]}
+                    >
+                      <Ionicons name="person" size={16} color="#67BA03" />
+                    </View>
+                    <Text style={styles.studentName}>{student.name}</Text>
+                    <Text
+                      style={[styles.attendancePercent, { color: "#67BA03" }]}
+                    >
+                      100%
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            {studentAttendance.length > 0 && (
+              <View style={styles.alertBox}>
+                <View style={styles.alertHeader}>
+                  <Ionicons name="alert-circle" size={20} color="#FF9800" />
+                  <Text style={styles.alertTitle}>Needs Attention</Text>
+                  <View style={styles.alertBadge}>
+                    <Text style={styles.alertBadgeText}>
+                      {Math.min(5, studentAttendance.length)}
+                    </Text>
+                  </View>
+                </View>
+                <Text style={[styles.chartSubtitle, { marginBottom: 12 }]}>
+                  Lowest 5 Attendance Rates
+                </Text>
+                {studentAttendance.slice(0, 5).map((student) => (
+                  <View key={student.studentID} style={styles.studentRow}>
+                    <View style={styles.studentIconSmall}>
+                      <Ionicons name="person" size={16} color="#FF9800" />
+                    </View>
+                    <Text style={styles.studentName}>{student.name}</Text>
+                    <Text
+                      style={[
+                        styles.attendancePercent,
+                        {
+                          color:
+                            student.attendanceRate >= 90
+                              ? "#4CAF50"
+                              : student.attendanceRate >= 75
+                              ? "#FF9800"
+                              : "#E53935",
+                        },
+                      ]}
+                    >
+                      {student.attendanceRate.toFixed(1)}%
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            )}
+          </Animated.View>
+
+          {/* All Students Table */}
+          <Animated.View
+            style={[
+              styles.tableCard,
+              {
+                opacity: fadeAnim,
+                transform: [{ translateY: slideAnim }],
+              },
+            ]}
+          >
+            <View style={styles.sectionHeader}>
+              <View style={styles.sectionIconBg}>
+                <Ionicons name="list" size={20} color="#2196F3" />
+              </View>
+              <Text style={styles.sectionTitle}>Individual Records</Text>
+            </View>
+            <View style={styles.tableHeader}>
+              <Text style={[styles.tableHeaderText, { flex: 2 }]}>Student</Text>
+              <Text style={styles.tableHeaderText}>Present</Text>
+              <Text style={styles.tableHeaderText}>Absent</Text>
+              <Text style={styles.tableHeaderText}>Rate</Text>
+            </View>
+            {studentAttendance.map((student, index) => (
+              <View key={student.studentID} style={styles.tableRow}>
+                <Text style={[styles.tableCell, { flex: 2 }]} numberOfLines={1}>
+                  {student.name}
+                </Text>
+                <Text style={styles.tableCell}>{student.presentCount}</Text>
+                <Text style={styles.tableCell}>{student.absentCount}</Text>
+                <Text
+                  style={[
+                    styles.tableCell,
+                    {
+                      color:
+                        student.attendanceRate >= 90
+                          ? "#4CAF50"
+                          : student.attendanceRate >= 75
+                          ? "#FF9800"
+                          : "#E53935",
+                      fontWeight: "bold",
+                    },
+                  ]}
+                >
+                  {student.attendanceRate.toFixed(1)}%
+                </Text>
+              </View>
+            ))}
+          </Animated.View>
+
+          <View style={{ height: 30 }} />
+        </ScrollView>
+      </View>
+    </>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: "#F5F7FA",
+  },
+  header: {
+    borderBottomLeftRadius: 30,
+    borderBottomRightRadius: 30,
+    paddingVertical: 20,
+    paddingHorizontal: 20,
+    overflow: "hidden",
+    elevation: 8,
+    height: 140,
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  circleDecor1: {
+    position: "absolute",
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    backgroundColor: "rgba(255, 255, 255, 0.1)",
+    top: -50,
+    right: -30,
+  },
+  circleDecor2: {
+    position: "absolute",
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: "rgba(255, 255, 255, 0.08)",
+    bottom: -20,
+    left: -20,
+  },
+  headerContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    zIndex: 1,
+    marginTop: 60,
+  },
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: "rgba(255, 255, 255, 0.2)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  headerTitle: {
+    color: "#fff",
+    fontSize: 20,
+    fontWeight: "bold",
+    flex: 1,
+    textAlign: "center",
+  },
+  headerPlaceholder: {
+    width: 40,
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    gap: 12,
+  },
+  loadingText: {
+    fontSize: 14,
+    color: "#666",
+    marginTop: 8,
+  },
+  scrollContent: {
+    padding: 20,
+  },
+  classInfoCard: {
+    backgroundColor: "#fff",
+    borderRadius: 20,
+    padding: 20,
+    marginBottom: 16,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  classIconBg: {
+    width: 64,
+    height: 64,
+    borderRadius: 16,
+    backgroundColor: "#E8F5E9",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 16,
+  },
+  classInfoContent: {
+    flex: 1,
+  },
+  className: {
+    fontSize: 20,
+    fontWeight: "bold",
+    color: "#333",
+    marginBottom: 8,
+  },
+  classDetail: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 4,
+  },
+  classDetailText: {
+    fontSize: 14,
+    color: "#666",
+  },
+  monthSelector: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    backgroundColor: "#fff",
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 16,
+    elevation: 2,
+    shadowColor: "#000",
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  monthArrow: {
+    padding: 8,
+    borderRadius: 12,
+    backgroundColor: "#F5F7FA",
+  },
+  monthInfo: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  monthText: {
+    fontSize: 16,
+    fontWeight: "bold",
+    color: "#333",
+  },
+  statsContainer: {
+    flexDirection: "row",
+    marginBottom: 20,
+    gap: 12,
+  },
+  statCard: {
+    flex: 1,
+    borderRadius: 16,
+    padding: 16,
+    alignItems: "center",
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  statIconBg: {
+    marginBottom: 8,
+  },
+  statValue: {
+    fontSize: 25,
+    fontWeight: "bold",
+    marginBottom: 4,
+  },
+  statLabel: {
+    fontSize: 12,
+    color: "#666",
+    fontWeight: "500",
+  },
+  chartCard: {
+    backgroundColor: "#fff",
+    borderRadius: 20,
+    padding: 20,
+    marginBottom: 16,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  chartHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 16,
+    gap: 12,
+  },
+  chartIconBg: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: "#F5F7FA",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  chartTitle: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: "#333",
+  },
+  chartSubtitle: {
+    fontSize: 13,
+    color: "#999",
+    marginTop: 2,
+  },
+  chart: {
+    borderRadius: 16,
+    marginVertical: 8,
+  },
+  alertsCard: {
+    backgroundColor: "#fff",
+    borderRadius: 20,
+    padding: 20,
+    marginBottom: 16,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  sectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 16,
+    gap: 12,
+  },
+  sectionIconBg: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: "#FFF3E0",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  sectionTitle: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: "#333",
+  },
+  alertBox: {
+    backgroundColor: "#FFF3E0",
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    borderLeftWidth: 4,
+    borderLeftColor: "#FF9800",
+  },
+  alertHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 12,
+    gap: 8,
+  },
+  alertTitle: {
+    fontSize: 15,
+    fontWeight: "bold",
+    color: "#FF9800",
+    flex: 1,
+  },
+  alertBadge: {
+    backgroundColor: "#FF9800",
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    minWidth: 24,
+    alignItems: "center",
+  },
+  alertBadgeText: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "bold",
+  },
+  studentRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 8,
+    gap: 10,
+  },
+  studentIconSmall: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: "#FFCCBC",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  studentName: {
+    flex: 1,
+    fontSize: 14,
+    color: "#333",
+    fontWeight: "500",
+  },
+  attendancePercent: {
+    fontSize: 14,
+    fontWeight: "bold",
+  },
+  tableCard: {
+    backgroundColor: "#fff",
+    borderRadius: 20,
+    padding: 20,
+    marginBottom: 16,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  tableHeader: {
+    flexDirection: "row",
+    backgroundColor: "#E8F5E9",
+    padding: 12,
+    borderRadius: 12,
+    marginBottom: 12,
+  },
+  tableHeaderText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: "bold",
+    color: "#333",
+    textAlign: "center",
+  },
+  tableRow: {
+    flexDirection: "row",
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#F0F0F0",
+    alignItems: "center",
+  },
+  tableCell: {
+    flex: 1,
+    fontSize: 13,
+    color: "#333",
+    textAlign: "center",
+  },
+});

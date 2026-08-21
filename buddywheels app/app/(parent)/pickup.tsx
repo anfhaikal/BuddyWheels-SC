@@ -1,0 +1,1763 @@
+import { Ionicons } from "@expo/vector-icons";
+import { useFocusEffect } from "@react-navigation/native";
+import { LinearGradient } from "expo-linear-gradient";
+import {
+  collection,
+  doc,
+  DocumentData,
+  getDoc,
+  getDocs,
+  onSnapshot,
+  query,
+  setDoc,
+  updateDoc,
+  where,
+} from "firebase/firestore";
+import React, { useEffect, useRef, useState } from "react";
+import {
+  ActivityIndicator,
+  Animated,
+  Modal,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
+// @ts-ignore
+import { auth, db } from "../../firebaseConfig";
+
+interface Student {
+  id: string;
+  name: string;
+  studentID: string;
+  classID?: string;
+  commuteType?: string;
+  driverID?: string;
+}
+
+interface PickupData {
+  parentID: string;
+  plateNumber: string;
+  date: string;
+  timeSlot: string;
+  status: "No status" | "On the way" | "Arrived" | "Dismissed";
+  studentIDs: string[];
+  students: Student[];
+  optedInStudents?: string[];
+}
+
+interface ParentSettings {
+  defaultPlateNumber?: string;
+  defaultTimeSlot?: string;
+}
+
+const TIME_SLOTS = ["5:00-5:30", "5:30-6:00", "6:00-6:30"];
+
+export default function PickupScreen() {
+  const [plateNumbers, setPlateNumbers] = useState<string[]>([]);
+  const [selectedPlate, setSelectedPlate] = useState<string>("");
+  const [selectedTimeSlot, setSelectedTimeSlot] = useState<string>("");
+  const [allStudents, setAllStudents] = useState<Student[]>([]);
+  const [presentStudents, setPresentStudents] = useState<Student[]>([]);
+  const [optedInStudents, setOptedInStudents] = useState<string[]>([]);
+  const [pickupData, setPickupData] = useState<PickupData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [currentDate, setCurrentDate] = useState(new Date());
+  const [parentSettings, setParentSettings] = useState<ParentSettings>({});
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showOptInModal, setShowOptInModal] = useState(false);
+  const [tempSettings, setTempSettings] = useState<ParentSettings>({});
+
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const slideAnim = useRef(new Animated.Value(50)).current;
+  const scrollViewRef = useRef<ScrollView>(null);
+
+  useFocusEffect(
+    React.useCallback(() => {
+      scrollViewRef.current?.scrollTo({ y: 0, animated: false });
+
+      const now = new Date();
+      setCurrentDate(now);
+      fetchData();
+
+      fadeAnim.setValue(0);
+      slideAnim.setValue(50);
+      Animated.parallel([
+        Animated.timing(fadeAnim, {
+          toValue: 1,
+          duration: 600,
+          useNativeDriver: true,
+        }),
+        Animated.timing(slideAnim, {
+          toValue: 0,
+          duration: 600,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    }, [])
+  );
+
+  // NEW: Function to fetch all queued students from other pickups
+  const fetchQueuedStudents = async (
+    dateStr: string,
+    currentParentID: string
+  ): Promise<Set<string>> => {
+    try {
+      const pickupsQuery = query(
+        collection(db, "pickups"),
+        where("date", "==", dateStr)
+      );
+      const pickupsSnap = await getDocs(pickupsQuery);
+
+      const queuedStudents = new Set<string>();
+      pickupsSnap.forEach((doc) => {
+        const data = doc.data();
+        // Exclude current parent's own pickup and only include active pickups
+        const isOwnPickup = data.parentID === currentParentID;
+        const isDismissed = data.status === "Dismissed";
+
+        if (!isOwnPickup && !isDismissed && data.studentIDs) {
+          data.studentIDs.forEach((studentID: string) => {
+            queuedStudents.add(studentID);
+          });
+        }
+      });
+
+      return queuedStudents;
+    } catch (error) {
+      console.error("❌ Error fetching queued students:", error);
+      return new Set<string>();
+    }
+  };
+
+  const fetchData = async (): Promise<void> => {
+    try {
+      setLoading(true);
+      // @ts-ignore
+      const currentUserID = auth.currentUser?.uid;
+      if (!currentUserID) {
+        console.error("❌ No user logged in");
+        return;
+      }
+
+      const userDoc = await getDoc(doc(db, "users", currentUserID));
+      if (!userDoc.exists()) {
+        console.error("❌ User document not found");
+        return;
+      }
+
+      const userData = userDoc.data();
+      const parentID = userData.id;
+
+      const parentDoc = await getDoc(doc(db, "Parent", parentID));
+      if (!parentDoc.exists()) {
+        console.error("❌ Parent document not found");
+        return;
+      }
+
+      const parentData = parentDoc.data();
+
+      const settings: ParentSettings = {
+        defaultPlateNumber: parentData.defaultPlateNumber,
+        defaultTimeSlot: parentData.defaultTimeSlot,
+      };
+      setParentSettings(settings);
+      setTempSettings(settings);
+
+      let plates: string[] = [];
+      if (parentData.plateNumbers) {
+        if (typeof parentData.plateNumbers === "string") {
+          plates = [parentData.plateNumbers];
+        } else if (Array.isArray(parentData.plateNumbers)) {
+          plates = parentData.plateNumbers;
+        }
+      }
+      setPlateNumbers(plates);
+
+      const studentQuery = query(
+        collection(db, "students"),
+        where("parentID", "==", parentID)
+      );
+      const studentSnap = await getDocs(studentQuery);
+      const studentList: Student[] = studentSnap.docs.map((docItem) => {
+        const data = docItem.data() as DocumentData;
+        return {
+          id: docItem.id,
+          name: data.name,
+          studentID: data.studentID,
+          classID: data.classID,
+          commuteType: data.commuteType,
+          driverID: data.driverID,
+        };
+      });
+
+      setAllStudents(studentList);
+
+      const dateStr = getMalaysiaDateString(new Date());
+      await fetchPresentStudents(studentList, dateStr, parentID);
+
+      const pickupDocRef = doc(db, "pickups", `${dateStr}_${parentID}`);
+      const pickupDoc = await getDoc(pickupDocRef);
+
+      if (pickupDoc.exists()) {
+        const data = pickupDoc.data() as PickupData;
+        setPickupData({
+          ...data,
+          students: studentList,
+        });
+        setSelectedPlate(data.plateNumber);
+        setSelectedTimeSlot(data.timeSlot);
+        setOptedInStudents(data.optedInStudents || []);
+      } else {
+        setPickupData(null);
+        setOptedInStudents([]);
+        setSelectedPlate(settings.defaultPlateNumber || plates[0] || "");
+        setSelectedTimeSlot(settings.defaultTimeSlot || TIME_SLOTS[0]);
+      }
+    } catch (error) {
+      console.error("❌ Error fetching data:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchPresentStudents = async (
+    studentList: Student[],
+    dateStr: string,
+    parentID: string
+  ): Promise<void> => {
+    try {
+      const attendanceQuery = query(
+        collection(db, "attendance"),
+        where("date", "==", dateStr)
+      );
+      const attendanceSnap = await getDocs(attendanceQuery);
+
+      const presentStudentIDs = new Set<string>();
+      attendanceSnap.forEach((doc) => {
+        const data = doc.data();
+        if (data.status === 1) {
+          presentStudentIDs.add(data.studentID);
+        }
+      });
+
+      // NEW: Fetch students already in other queues
+      const queuedStudents = await fetchQueuedStudents(dateStr, parentID);
+
+      // Filter out students who are already queued elsewhere
+      const present = studentList.filter((student) => {
+        const isPresent = presentStudentIDs.has(student.studentID);
+        const isQueued = queuedStudents.has(student.studentID);
+        // Only include if present AND NOT already queued
+        return isPresent && !isQueued;
+      });
+
+      setPresentStudents(present);
+    } catch (error) {
+      console.error("❌ Error fetching present students:", error);
+      setPresentStudents([]);
+    }
+  };
+
+  // Real-time listener for attendance and pickup queue changes
+  useEffect(() => {
+    const dateStr = getMalaysiaDateString(currentDate);
+
+    // @ts-ignore
+    const currentUserID = auth.currentUser?.uid;
+    if (!currentUserID) return;
+
+    const attendanceQuery = query(
+      collection(db, "attendance"),
+      where("date", "==", dateStr)
+    );
+
+    const pickupsQuery = query(
+      collection(db, "pickups"),
+      where("date", "==", dateStr)
+    );
+
+    // Listen to attendance changes
+    const unsubscribeAttendance = onSnapshot(
+      attendanceQuery,
+      async (snapshot) => {
+        const userDoc = await getDoc(doc(db, "users", currentUserID));
+        if (!userDoc.exists()) return;
+        const parentID = userDoc.data().id;
+
+        const presentStudentIDs = new Set<string>();
+        snapshot.forEach((doc) => {
+          const data = doc.data();
+          if (data.status === 1) {
+            presentStudentIDs.add(data.studentID);
+          }
+        });
+
+        // Fetch queued students
+        const queuedStudents = await fetchQueuedStudents(dateStr, parentID);
+
+        const present = allStudents.filter((student) => {
+          const isPresent = presentStudentIDs.has(student.studentID);
+          const isQueued = queuedStudents.has(student.studentID);
+          return isPresent && !isQueued;
+        });
+
+        setPresentStudents(present);
+      }
+    );
+
+    // NEW: Listen to pickups changes (for queue updates)
+    const unsubscribePickups = onSnapshot(pickupsQuery, async () => {
+      const userDoc = await getDoc(doc(db, "users", currentUserID));
+      if (!userDoc.exists()) return;
+      const parentID = userDoc.data().id;
+
+      const attendanceSnap = await getDocs(attendanceQuery);
+      const presentStudentIDs = new Set<string>();
+      attendanceSnap.forEach((doc) => {
+        const data = doc.data();
+        if (data.status === 1) {
+          presentStudentIDs.add(data.studentID);
+        }
+      });
+
+      const queuedStudents = await fetchQueuedStudents(dateStr, parentID);
+
+      const present = allStudents.filter((student) => {
+        const isPresent = presentStudentIDs.has(student.studentID);
+        const isQueued = queuedStudents.has(student.studentID);
+        return isPresent && !isQueued;
+      });
+
+      setPresentStudents(present);
+    });
+
+    return () => {
+      unsubscribeAttendance();
+      unsubscribePickups();
+    };
+  }, [allStudents, currentDate]);
+
+  const getEligibleStudents = () => {
+    return presentStudents.filter((student) => {
+      const isParentCommute =
+        student.commuteType === "parent" || !student.commuteType;
+      const isOptedIn = optedInStudents.includes(student.studentID);
+      return isParentCommute || isOptedIn;
+    });
+  };
+
+  const getNonParentCommuteStudents = () => {
+    return presentStudents.filter((student) => {
+      const hasOtherCommute =
+        student.commuteType && student.commuteType !== "parent";
+      return hasOtherCommute;
+    });
+  };
+
+  const toggleOptIn = (studentID: string) => {
+    setOptedInStudents((prev) =>
+      prev.includes(studentID)
+        ? prev.filter((id) => id !== studentID)
+        : [...prev, studentID]
+    );
+  };
+
+  const handleSave = async (): Promise<void> => {
+    try {
+      setSaving(true);
+      // @ts-ignore
+      const currentUserID = auth.currentUser?.uid;
+      if (!currentUserID) {
+        alert("❌ No user logged in");
+        return;
+      }
+
+      const userDoc = await getDoc(doc(db, "users", currentUserID));
+      if (!userDoc.exists()) {
+        alert("❌ User document not found");
+        return;
+      }
+
+      const parentID = userDoc.data().id;
+      const dateStr = getMalaysiaDateString(new Date());
+      const pickupDocRef = doc(db, "pickups", `${dateStr}_${parentID}`);
+
+      const eligible = getEligibleStudents();
+      const studentIDs = eligible.map((s) => s.studentID);
+
+      if (studentIDs.length === 0) {
+        alert("⚠️ No students available for pickup today.");
+        setSaving(false);
+        return;
+      }
+
+      await setDoc(pickupDocRef, {
+        parentID,
+        plateNumber: selectedPlate,
+        date: dateStr,
+        timeSlot: selectedTimeSlot,
+        status: "On the way",
+        studentIDs,
+        optedInStudents: optedInStudents,
+        updatedAt: new Date().toISOString(),
+      });
+
+      alert("✅ Pickup details saved successfully!");
+      await fetchData();
+    } catch (error) {
+      console.error("❌ Error saving pickup:", error);
+      alert("Failed to save pickup details.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleConfirmArrival = async (): Promise<void> => {
+    try {
+      setSaving(true);
+      // @ts-ignore
+      const currentUserID = auth.currentUser?.uid;
+      if (!currentUserID) {
+        alert("❌ No user logged in");
+        return;
+      }
+
+      const userDoc = await getDoc(doc(db, "users", currentUserID));
+      if (!userDoc.exists()) {
+        alert("❌ User document not found");
+        return;
+      }
+
+      const parentID = userDoc.data().id;
+      const dateStr = getMalaysiaDateString(new Date());
+      const pickupDocRef = doc(db, "pickups", `${dateStr}_${parentID}`);
+
+      await setDoc(
+        pickupDocRef,
+        {
+          status: "Arrived",
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+
+      alert("✅ Arrival confirmed!");
+      await fetchData();
+    } catch (error) {
+      console.error("❌ Error confirming arrival:", error);
+      alert("Failed to confirm arrival.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDismiss = async (): Promise<void> => {
+    try {
+      setSaving(true);
+      // @ts-ignore
+      const currentUserID = auth.currentUser?.uid;
+      if (!currentUserID) {
+        alert("❌ No user logged in");
+        return;
+      }
+
+      const userDoc = await getDoc(doc(db, "users", currentUserID));
+      if (!userDoc.exists()) {
+        alert("❌ User document not found");
+        return;
+      }
+
+      const parentID = userDoc.data().id;
+      const dateStr = getMalaysiaDateString(new Date());
+      const pickupDocRef = doc(db, "pickups", `${dateStr}_${parentID}`);
+
+      await setDoc(
+        pickupDocRef,
+        {
+          status: "Dismissed",
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+
+      alert("✅ Pickup dismissed!");
+      await fetchData();
+    } catch (error) {
+      console.error("❌ Error dismissing pickup:", error);
+      alert("Failed to dismiss pickup.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSaveSettings = async (): Promise<void> => {
+    try {
+      setSaving(true);
+      // @ts-ignore
+      const currentUserID = auth.currentUser?.uid;
+      if (!currentUserID) {
+        alert("❌ No user logged in");
+        return;
+      }
+
+      const userDoc = await getDoc(doc(db, "users", currentUserID));
+      if (!userDoc.exists()) {
+        alert("❌ User document not found");
+        return;
+      }
+
+      const parentID = userDoc.data().id;
+      const parentDocRef = doc(db, "Parent", parentID);
+
+      await updateDoc(parentDocRef, {
+        defaultPlateNumber: tempSettings.defaultPlateNumber,
+        defaultTimeSlot: tempSettings.defaultTimeSlot,
+      });
+
+      setParentSettings(tempSettings);
+      if (tempSettings.defaultPlateNumber) {
+        setSelectedPlate(tempSettings.defaultPlateNumber);
+      }
+      if (tempSettings.defaultTimeSlot) {
+        setSelectedTimeSlot(tempSettings.defaultTimeSlot);
+      }
+
+      setShowSettingsModal(false);
+      alert("✅ Default settings saved!");
+    } catch (error) {
+      console.error("❌ Error saving settings:", error);
+      alert("Failed to save settings.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleCloseModal = () => {
+    setTempSettings(parentSettings);
+    setShowSettingsModal(false);
+  };
+
+  const getMalaysiaDateString = (date: Date): string => {
+    const options = {
+      timeZone: "Asia/Kuala_Lumpur",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    } as const;
+    const formatter = new Intl.DateTimeFormat("en-CA", options);
+    const parts = formatter.formatToParts(date);
+    const year = parts.find((p) => p.type === "year")?.value || "";
+    const month = parts.find((p) => p.type === "month")?.value || "";
+    const day = parts.find((p) => p.type === "day")?.value || "";
+    return `${year}-${month}-${day}`;
+  };
+
+  const formatDate = (date: Date): string => {
+    return date.toLocaleDateString("en-MY", {
+      weekday: "short",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      timeZone: "Asia/Kuala_Lumpur",
+    });
+  };
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case "On the way":
+        return "#FF9800";
+      case "Arrived":
+        return "#4CAF50";
+      case "Dismissed":
+        return "#2196F3";
+      default:
+        return "#9E9E9E";
+    }
+  };
+
+  const getStatusBgColor = (status: string) => {
+    switch (status) {
+      case "On the way":
+        return "#FFF3E0";
+      case "Arrived":
+        return "#E8F5E9";
+      case "Dismissed":
+        return "#E3F2FD";
+      default:
+        return "#F5F5F5";
+    }
+  };
+
+  const getCommuteTypeLabel = (student: Student) => {
+    if (student.commuteType === "driver" || student.driverID) {
+      return "School Van";
+    } else if (student.commuteType === "self") {
+      return "Self Commute";
+    }
+    return "Other";
+  };
+
+  const eligibleStudents = getEligibleStudents();
+  const nonParentStudents = getNonParentCommuteStudents();
+
+  return (
+    <>
+      <StatusBar backgroundColor="#67BA03" barStyle="light-content" />
+      <View style={styles.container}>
+        <LinearGradient
+          colors={["#67BA03", "#5AA002", "#4D8902"]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.header}
+        >
+          <View style={styles.circleDecor1} />
+          <View style={styles.circleDecor2} />
+          <View style={styles.headerContent}>
+            <Text style={styles.headerTitle}>Pickup Queue</Text>
+            <TouchableOpacity
+              onPress={() => setShowSettingsModal(true)}
+              style={styles.settingsButton}
+            >
+              <Ionicons name="settings-outline" size={22} color="#fff" />
+            </TouchableOpacity>
+          </View>
+        </LinearGradient>
+
+        <ScrollView
+          ref={scrollViewRef}
+          style={styles.content}
+          showsVerticalScrollIndicator={false}
+        >
+          <Animated.View
+            style={[
+              styles.dateCard,
+              {
+                opacity: fadeAnim,
+                transform: [{ translateY: slideAnim }],
+              },
+            ]}
+          >
+            <View style={styles.dateHeader}>
+              <View style={styles.dateIconBg}>
+                <Ionicons name="calendar-outline" size={24} color="#67BA03" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.dateLabel}>Today's Date</Text>
+                <Text style={styles.dateText}>{formatDate(currentDate)}</Text>
+              </View>
+            </View>
+            <View style={styles.reminderBox}>
+              <Ionicons name="alert-circle" size={20} color="#FF9800" />
+              <Text style={styles.reminderText}>
+                Only students marked as present and not in other queues can be
+                added to pickup.
+              </Text>
+            </View>
+          </Animated.View>
+
+          {pickupData && (
+            <Animated.View
+              style={[
+                styles.statusCard,
+                {
+                  opacity: fadeAnim,
+                  transform: [{ translateY: slideAnim }],
+                },
+              ]}
+            >
+              <View style={styles.statusHeader}>
+                <Text style={styles.statusTitle}>Current Status</Text>
+                <View
+                  style={[
+                    styles.statusBadge,
+                    { backgroundColor: getStatusBgColor(pickupData.status) },
+                  ]}
+                >
+                  <View
+                    style={[
+                      styles.statusDot,
+                      { backgroundColor: getStatusColor(pickupData.status) },
+                    ]}
+                  />
+                  <Text
+                    style={[
+                      styles.statusText,
+                      { color: getStatusColor(pickupData.status) },
+                    ]}
+                  >
+                    {pickupData.status}
+                  </Text>
+                </View>
+              </View>
+            </Animated.View>
+          )}
+
+          <Animated.View
+            style={[
+              styles.card,
+              {
+                opacity: fadeAnim,
+                transform: [{ translateY: slideAnim }],
+              },
+            ]}
+          >
+            <View style={styles.cardHeader}>
+              <View style={styles.cardIconBg}>
+                <Ionicons name="car-sport" size={24} color="#67BA03" />
+              </View>
+              <Text style={styles.cardTitle}>Vehicle & Time Slot</Text>
+            </View>
+
+            <View style={styles.compactSection}>
+              <Text style={styles.sectionLabel}>Select Vehicle</Text>
+              <View style={styles.compactPlateGrid}>
+                {plateNumbers.length > 0 ? (
+                  plateNumbers.map((plate, index) => (
+                    <TouchableOpacity
+                      key={index}
+                      style={[
+                        styles.compactPlateButton,
+                        selectedPlate === plate &&
+                          styles.compactPlateButtonSelected,
+                      ]}
+                      onPress={() => setSelectedPlate(plate)}
+                      disabled={
+                        pickupData?.status === "Arrived" ||
+                        pickupData?.status === "Dismissed"
+                      }
+                      activeOpacity={0.7}
+                    >
+                      <Text
+                        style={[
+                          styles.compactPlateText,
+                          selectedPlate === plate &&
+                            styles.compactPlateTextSelected,
+                        ]}
+                      >
+                        {plate}
+                      </Text>
+                      {selectedPlate === plate && (
+                        <Ionicons
+                          name="checkmark-circle"
+                          size={16}
+                          color="#67BA03"
+                        />
+                      )}
+                    </TouchableOpacity>
+                  ))
+                ) : (
+                  <Text style={styles.noDataText}>No vehicles registered</Text>
+                )}
+              </View>
+            </View>
+
+            <View style={styles.divider} />
+
+            <View style={styles.compactSection}>
+              <Text style={styles.sectionLabel}>Pick-up Time</Text>
+              <View style={styles.compactTimeGrid}>
+                {TIME_SLOTS.map((slot) => (
+                  <TouchableOpacity
+                    key={slot}
+                    style={[
+                      styles.compactTimeButton,
+                      selectedTimeSlot === slot &&
+                        styles.compactTimeButtonSelected,
+                    ]}
+                    onPress={() => setSelectedTimeSlot(slot)}
+                    disabled={
+                      pickupData?.status === "Arrived" ||
+                      pickupData?.status === "Dismissed"
+                    }
+                    activeOpacity={0.7}
+                  >
+                    <Text
+                      style={[
+                        styles.compactTimeText,
+                        selectedTimeSlot === slot &&
+                          styles.compactTimeTextSelected,
+                      ]}
+                    >
+                      {slot}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+            <View style={styles.divider} />
+
+            <View style={styles.buttonContainer}>
+              {pickupData?.status !== "Arrived" &&
+                pickupData?.status !== "Dismissed" && (
+                  <TouchableOpacity
+                    style={[
+                      styles.actionButton,
+                      (saving ||
+                        !selectedPlate ||
+                        !selectedTimeSlot ||
+                        eligibleStudents.length === 0) &&
+                        styles.buttonDisabled,
+                    ]}
+                    onPress={handleSave}
+                    disabled={
+                      saving ||
+                      !selectedPlate ||
+                      !selectedTimeSlot ||
+                      eligibleStudents.length === 0
+                    }
+                    activeOpacity={0.8}
+                  >
+                    <LinearGradient
+                      colors={["#E0E0E0", "#BDBDBD"]}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={styles.buttonGradient}
+                    >
+                      {saving ? (
+                        <ActivityIndicator color="#333" />
+                      ) : (
+                        <>
+                          <Ionicons
+                            name="save-outline"
+                            size={20}
+                            color="#333"
+                          />
+                          <Text style={styles.saveButtonText}>
+                            Queue Pickup
+                          </Text>
+                        </>
+                      )}
+                    </LinearGradient>
+                  </TouchableOpacity>
+                )}
+
+              {pickupData?.status === "On the way" && (
+                <TouchableOpacity
+                  style={[styles.actionButton, saving && styles.buttonDisabled]}
+                  onPress={handleConfirmArrival}
+                  disabled={saving}
+                  activeOpacity={0.8}
+                >
+                  <LinearGradient
+                    colors={["#67BA03", "#5AA002"]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.buttonGradient}
+                  >
+                    {saving ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <>
+                        <Ionicons
+                          name="checkmark-circle"
+                          size={24}
+                          color="#fff"
+                        />
+                        <Text style={styles.confirmButtonText}>
+                          Confirm Arrival
+                        </Text>
+                      </>
+                    )}
+                  </LinearGradient>
+                </TouchableOpacity>
+              )}
+
+              {pickupData?.status === "Arrived" && (
+                <TouchableOpacity
+                  style={[styles.actionButton, saving && styles.buttonDisabled]}
+                  onPress={handleDismiss}
+                  disabled={saving}
+                  activeOpacity={0.8}
+                >
+                  <LinearGradient
+                    colors={["#2196F3", "#1976D2"]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.buttonGradient}
+                  >
+                    {saving ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <>
+                        <Ionicons name="exit-outline" size={24} color="#fff" />
+                        <Text style={styles.confirmButtonText}>Dismiss</Text>
+                      </>
+                    )}
+                  </LinearGradient>
+                </TouchableOpacity>
+              )}
+            </View>
+          </Animated.View>
+
+          <Animated.View
+            style={[
+              styles.card,
+              {
+                opacity: fadeAnim,
+                transform: [{ translateY: slideAnim }],
+              },
+            ]}
+          >
+            <View style={styles.cardHeader}>
+              <View style={styles.cardIconBg}>
+                <Ionicons name="people" size={24} color="#FF9800" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.cardTitle}>Students Present Today</Text>
+                <Text style={styles.cardSubtitle}>
+                  {eligibleStudents.length} of {presentStudents.length} in
+                  pickup queue
+                </Text>
+              </View>
+              {nonParentStudents.length > 0 && (
+                <TouchableOpacity
+                  style={styles.optInButton}
+                  onPress={() => setShowOptInModal(true)}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="add-circle" size={20} color="#fff" />
+                  <Text style={styles.optInButtonText}>Opt-In</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
+            {loading ? (
+              <View style={styles.loadingContainer}>
+                <ActivityIndicator size="small" color="#FF9800" />
+              </View>
+            ) : eligibleStudents.length > 0 ? (
+              <View style={styles.studentList}>
+                {eligibleStudents.map((student) => {
+                  const isOptedIn = optedInStudents.includes(student.studentID);
+                  return (
+                    <View key={student.id} style={styles.studentItem}>
+                      <View style={styles.studentAvatar}>
+                        <Text style={styles.studentAvatarText}>
+                          {student.name.charAt(0).toUpperCase()}
+                        </Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.studentName}>{student.name}</Text>
+                        <Text style={styles.studentID}>
+                          ID: {student.studentID}
+                        </Text>
+                      </View>
+                      {isOptedIn ? (
+                        <View style={styles.optedInBadge}>
+                          <Ionicons
+                            name="swap-horizontal"
+                            size={14}
+                            color="#2196F3"
+                          />
+                          <Text style={styles.optedInText}>Opted-In</Text>
+                        </View>
+                      ) : (
+                        <View style={styles.presentBadge}>
+                          <Ionicons
+                            name="checkmark-circle"
+                            size={16}
+                            color="#4CAF50"
+                          />
+                          <Text style={styles.presentText}>Present</Text>
+                        </View>
+                      )}
+                    </View>
+                  );
+                })}
+              </View>
+            ) : (
+              <View style={styles.emptyState}>
+                <Ionicons name="people-outline" size={48} color="#E0E0E0" />
+                <Text style={styles.emptyStateText}>
+                  {presentStudents.length === 0
+                    ? "No students are present today"
+                    : "No students available for parent pickup"}
+                </Text>
+                {nonParentStudents.length > 0 && (
+                  <Text style={styles.emptyStateSubtext}>
+                    Tap "Opt-In" to add students with other commute types
+                  </Text>
+                )}
+              </View>
+            )}
+          </Animated.View>
+
+          <View style={{ height: 30 }} />
+        </ScrollView>
+
+        {/* Settings Modal */}
+        <Modal
+          visible={showSettingsModal}
+          animationType="slide"
+          transparent={true}
+          onRequestClose={handleCloseModal}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Default Settings</Text>
+                <TouchableOpacity
+                  onPress={handleCloseModal}
+                  style={styles.closeButton}
+                >
+                  <Ionicons name="close" size={24} color="#666" />
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView style={styles.modalBody}>
+                <Text style={styles.modalDescription}>
+                  Set your default preferences to save time on daily pickups
+                </Text>
+
+                <View style={styles.settingSection}>
+                  <Text style={styles.settingLabel}>Default Vehicle</Text>
+                  <View style={styles.compactPlateGrid}>
+                    {plateNumbers.map((plate, index) => (
+                      <TouchableOpacity
+                        key={index}
+                        style={[
+                          styles.compactPlateButton,
+                          tempSettings.defaultPlateNumber === plate &&
+                            styles.compactPlateButtonSelected,
+                        ]}
+                        onPress={() =>
+                          setTempSettings({
+                            ...tempSettings,
+                            defaultPlateNumber: plate,
+                          })
+                        }
+                        activeOpacity={0.7}
+                      >
+                        <Text
+                          style={[
+                            styles.compactPlateText,
+                            tempSettings.defaultPlateNumber === plate &&
+                              styles.compactPlateTextSelected,
+                          ]}
+                        >
+                          {plate}
+                        </Text>
+                        {tempSettings.defaultPlateNumber === plate && (
+                          <Ionicons
+                            name="checkmark-circle"
+                            size={16}
+                            color="#67BA03"
+                          />
+                        )}
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+
+                <View style={styles.settingSection}>
+                  <Text style={styles.settingLabel}>Default Time Slot</Text>
+                  <View style={styles.compactTimeGrid}>
+                    {TIME_SLOTS.map((slot) => (
+                      <TouchableOpacity
+                        key={slot}
+                        style={[
+                          styles.compactTimeButton,
+                          tempSettings.defaultTimeSlot === slot &&
+                            styles.compactTimeButtonSelected,
+                        ]}
+                        onPress={() =>
+                          setTempSettings({
+                            ...tempSettings,
+                            defaultTimeSlot: slot,
+                          })
+                        }
+                        activeOpacity={0.7}
+                      >
+                        <Text
+                          style={[
+                            styles.compactTimeText,
+                            tempSettings.defaultTimeSlot === slot &&
+                              styles.compactTimeTextSelected,
+                          ]}
+                        >
+                          {slot}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+
+                <View style={styles.infoBox}>
+                  <Ionicons
+                    name="information-circle"
+                    size={20}
+                    color="#2196F3"
+                  />
+                  <Text style={styles.infoText}>
+                    These defaults will be automatically selected when you visit
+                    this page
+                  </Text>
+                </View>
+              </ScrollView>
+
+              <View style={styles.modalFooter}>
+                <TouchableOpacity
+                  style={styles.modalActionButton}
+                  onPress={handleSaveSettings}
+                  disabled={saving}
+                  activeOpacity={0.8}
+                >
+                  <LinearGradient
+                    colors={["#67BA03", "#5AA002"]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.buttonGradient}
+                  >
+                    {saving ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.modalButtonText}>Save Settings</Text>
+                    )}
+                  </LinearGradient>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
+        {/* Opt-In Modal */}
+        <Modal
+          visible={showOptInModal}
+          animationType="slide"
+          transparent={true}
+          onRequestClose={() => setShowOptInModal(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.modalTitle}>Opt-In for Today</Text>
+                  <Text style={styles.dropOffStats}>
+                    Pick up students with other commute arrangements
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  onPress={() => setShowOptInModal(false)}
+                  style={styles.closeButton}
+                >
+                  <Ionicons name="close" size={24} color="#666" />
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView style={styles.modalBody}>
+                <View style={styles.infoBox}>
+                  <Ionicons
+                    name="information-circle"
+                    size={20}
+                    color="#2196F3"
+                  />
+                  <Text style={styles.infoText}>
+                    Select students who normally use school van/self-commute but
+                    need parent pickup today
+                  </Text>
+                </View>
+
+                <View style={styles.dropOffList}>
+                  {nonParentStudents.map((student) => {
+                    const isOptedIn = optedInStudents.includes(
+                      student.studentID
+                    );
+                    return (
+                      <TouchableOpacity
+                        key={student.id}
+                        style={[
+                          styles.dropOffItem,
+                          isOptedIn && styles.dropOffItemCompleted,
+                        ]}
+                        onPress={() => toggleOptIn(student.studentID)}
+                        activeOpacity={0.7}
+                      >
+                        <View style={styles.studentAvatar}>
+                          <Text style={styles.studentAvatarText}>
+                            {student.name.charAt(0).toUpperCase()}
+                          </Text>
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.studentName}>{student.name}</Text>
+                          <Text style={styles.studentID}>
+                            ID: {student.studentID}
+                          </Text>
+                          <Text style={styles.commuteTypeText}>
+                            Usually: {getCommuteTypeLabel(student)}
+                          </Text>
+                        </View>
+                        {isOptedIn ? (
+                          <View style={styles.droppedOffBadge}>
+                            <Ionicons
+                              name="checkmark-circle"
+                              size={24}
+                              color="#4CAF50"
+                            />
+                            <Text style={styles.droppedOffText}>Opted-In</Text>
+                          </View>
+                        ) : (
+                          <View style={styles.pendingBadge}>
+                            <Ionicons
+                              name="ellipse-outline"
+                              size={24}
+                              color="#999"
+                            />
+                            <Text style={styles.pendingText}>Tap to Add</Text>
+                          </View>
+                        )}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </ScrollView>
+
+              <View style={styles.modalFooter}>
+                <TouchableOpacity
+                  style={styles.modalActionButton}
+                  onPress={() => setShowOptInModal(false)}
+                  activeOpacity={0.8}
+                >
+                  <LinearGradient
+                    colors={["#67BA03", "#5AA002"]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.buttonGradient}
+                  >
+                    <Text style={styles.modalButtonText}>Done</Text>
+                  </LinearGradient>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+      </View>
+    </>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: "#F5F7FA",
+  },
+  header: {
+    borderBottomLeftRadius: 30,
+    borderBottomRightRadius: 30,
+    paddingVertical: 20,
+    paddingHorizontal: 20,
+    overflow: "hidden",
+    elevation: 8,
+    height: 140,
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  circleDecor1: {
+    position: "absolute",
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    backgroundColor: "rgba(255, 255, 255, 0.1)",
+    top: -50,
+    right: -30,
+  },
+  circleDecor2: {
+    position: "absolute",
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: "rgba(255, 255, 255, 0.08)",
+    bottom: -20,
+    left: -20,
+  },
+  headerContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    zIndex: 1,
+    marginTop: 60,
+  },
+  headerTitle: {
+    color: "#fff",
+    fontSize: 20,
+    fontWeight: "bold",
+    textAlign: "center",
+    flex: 1,
+  },
+  settingsButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: "rgba(255, 255, 255, 0.2)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  content: {
+    flex: 1,
+    padding: 20,
+  },
+  dateCard: {
+    backgroundColor: "#fff",
+    borderRadius: 20,
+    padding: 20,
+    marginBottom: 16,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    borderWidth: 1,
+    borderColor: "rgba(103, 186, 3, 0.1)",
+  },
+  dateHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 16,
+    gap: 12,
+  },
+  dateIconBg: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    backgroundColor: "#E8F5E9",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  dateLabel: {
+    fontSize: 12,
+    color: "#999",
+    fontWeight: "500",
+    marginBottom: 4,
+  },
+  dateText: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#333",
+  },
+  reminderBox: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    backgroundColor: "#FFF3E0",
+    padding: 14,
+    borderRadius: 12,
+    gap: 10,
+  },
+  reminderText: {
+    fontSize: 13,
+    color: "#E65100",
+    flex: 1,
+    lineHeight: 20,
+  },
+  statusCard: {
+    backgroundColor: "#fff",
+    borderRadius: 20,
+    padding: 20,
+    marginBottom: 16,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  statusHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  statusTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#333",
+  },
+  statusBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    gap: 6,
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  statusText: {
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  card: {
+    backgroundColor: "#fff",
+    borderRadius: 20,
+    padding: 20,
+    marginBottom: 16,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  cardHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 20,
+    gap: 12,
+  },
+  cardIconBg: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    backgroundColor: "#F5F7FA",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  cardTitle: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: "#333",
+  },
+  cardSubtitle: {
+    fontSize: 13,
+    color: "#999",
+    marginTop: 2,
+  },
+  optInButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#2196F3",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    gap: 6,
+  },
+  optInButtonText: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  compactSection: {
+    marginBottom: 16,
+  },
+  sectionLabel: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: "#666",
+    marginBottom: 10,
+  },
+  compactPlateGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  compactPlateButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#F5F7FA",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: "#E0E0E0",
+    gap: 6,
+  },
+  compactPlateButtonSelected: {
+    backgroundColor: "#E8F5E9",
+    borderColor: "#67BA03",
+  },
+  compactPlateText: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#666",
+  },
+  compactPlateTextSelected: {
+    color: "#67BA03",
+  },
+  divider: {
+    height: 1,
+    backgroundColor: "#E0E0E0",
+    marginVertical: 16,
+  },
+  compactTimeGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  compactTimeButton: {
+    flex: 1,
+    minWidth: 100,
+    backgroundColor: "#F5F7FA",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: "#E0E0E0",
+    alignItems: "center",
+  },
+  compactTimeButtonSelected: {
+    backgroundColor: "#E3F2FD",
+    borderColor: "#2196F3",
+  },
+  compactTimeText: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#666",
+  },
+  compactTimeTextSelected: {
+    color: "#2196F3",
+  },
+  loadingContainer: {
+    paddingVertical: 30,
+    alignItems: "center",
+  },
+  studentList: {
+    gap: 12,
+  },
+  studentItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#F5F7FA",
+    padding: 14,
+    borderRadius: 12,
+    gap: 12,
+  },
+  studentAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: "#67BA03",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  studentAvatarText: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#fff",
+  },
+  studentName: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "#333",
+    marginBottom: 2,
+  },
+  studentID: {
+    fontSize: 12,
+    color: "#999",
+  },
+  commuteTypeText: {
+    fontSize: 11,
+    color: "#666",
+    marginTop: 2,
+  },
+  presentBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "#E8F5E9",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  presentText: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: "#4CAF50",
+  },
+  optedInBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "#E3F2FD",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  optedInText: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: "#2196F3",
+  },
+  emptyState: {
+    alignItems: "center",
+    paddingVertical: 30,
+    gap: 12,
+  },
+  emptyStateText: {
+    fontSize: 14,
+    color: "#999",
+    fontStyle: "italic",
+    textAlign: "center",
+  },
+  emptyStateSubtext: {
+    fontSize: 12,
+    color: "#BBB",
+    fontStyle: "italic",
+    textAlign: "center",
+    marginTop: 4,
+  },
+  noDataText: {
+    fontSize: 13,
+    color: "#999",
+    fontStyle: "italic",
+  },
+  buttonContainer: {
+    gap: 12,
+  },
+  actionButton: {
+    borderRadius: 16,
+    overflow: "hidden",
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  buttonGradient: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 16,
+    gap: 8,
+  },
+  saveButtonText: {
+    color: "#333",
+    fontWeight: "700",
+    fontSize: 15,
+  },
+  confirmButtonText: {
+    color: "#fff",
+    fontWeight: "700",
+    fontSize: 16,
+  },
+  buttonDisabled: {
+    opacity: 0.5,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.5)",
+    justifyContent: "flex-end",
+  },
+  modalContent: {
+    backgroundColor: "#fff",
+    borderTopLeftRadius: 30,
+    borderTopRightRadius: 30,
+    maxHeight: "80%",
+    elevation: 10,
+  },
+  modalHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: "#F0F0F0",
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: "700",
+    color: "#333",
+  },
+  dropOffStats: {
+    fontSize: 14,
+    color: "#666",
+    marginTop: 4,
+  },
+  closeButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "#F5F7FA",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  modalBody: {
+    padding: 20,
+  },
+  modalDescription: {
+    fontSize: 14,
+    color: "#666",
+    marginBottom: 20,
+    lineHeight: 20,
+  },
+  settingSection: {
+    marginBottom: 24,
+  },
+  settingLabel: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "#333",
+    marginBottom: 12,
+  },
+  infoBox: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    backgroundColor: "#E3F2FD",
+    padding: 14,
+    borderRadius: 12,
+    gap: 10,
+    marginBottom: 16,
+  },
+  infoText: {
+    fontSize: 13,
+    color: "#1976D2",
+    flex: 1,
+    lineHeight: 18,
+  },
+  modalFooter: {
+    padding: 20,
+    borderTopWidth: 1,
+    borderTopColor: "#F0F0F0",
+  },
+  modalActionButton: {
+    borderRadius: 16,
+    overflow: "hidden",
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+  },
+  modalButtonText: {
+    color: "#fff",
+    fontWeight: "700",
+    fontSize: 16,
+  },
+  dropOffList: {
+    gap: 12,
+  },
+  dropOffItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#F5F7FA",
+    padding: 14,
+    borderRadius: 12,
+    gap: 12,
+    borderWidth: 2,
+    borderColor: "transparent",
+  },
+  dropOffItemCompleted: {
+    backgroundColor: "#E8F5E9",
+    borderColor: "#4CAF50",
+  },
+  droppedOffBadge: {
+    alignItems: "center",
+    gap: 4,
+  },
+  droppedOffText: {
+    fontSize: 11,
+    color: "#4CAF50",
+    fontWeight: "600",
+  },
+  pendingBadge: {
+    alignItems: "center",
+    gap: 4,
+  },
+  pendingText: {
+    fontSize: 11,
+    color: "#999",
+    fontWeight: "600",
+  },
+});

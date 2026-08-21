@@ -1,0 +1,1008 @@
+// ChildAttendanceScreen.tsx
+import { Ionicons } from "@expo/vector-icons";
+import { useFocusEffect } from "@react-navigation/native";
+import { router } from "expo-router";
+import {
+  collection,
+  doc,
+  DocumentData,
+  getDoc,
+  getDocs,
+  query,
+  setDoc,
+  where,
+} from "firebase/firestore";
+import React, { useEffect, useRef, useState } from "react";
+import {
+  Alert,
+  Animated,
+  Dimensions,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  TouchableWithoutFeedback,
+  View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+// @ts-ignore
+import { auth, db } from "../../firebaseConfig";
+
+import * as DocumentPicker from "expo-document-picker";
+import { File } from "expo-file-system";
+
+interface Child {
+  id: string;
+  name: string;
+  studentID: string;
+  status: string;
+  excuseStatus?: string;
+}
+
+export default function ChildAttendanceScreen() {
+  const [children, setChildren] = useState<Child[]>([]);
+  const [selectedDate, setSelectedDate] = useState<Date>(new Date());
+  const [currentMonth, setCurrentMonth] = useState<Date>(new Date());
+  const [selectedChild, setSelectedChild] = useState<Child | null>(null);
+  const [excuseText, setExcuseText] = useState<string>("");
+  const [selectedFileBase64, setSelectedFileBase64] = useState<string | null>(
+    null
+  );
+  const [selectedFileName, setSelectedFileName] = useState<string>("");
+  const [submissionReview, setSubmissionReview] =
+    useState<string>("No submission yet");
+
+  const [timeRemainingText, setTimeRemainingText] = useState<string>("—");
+  const [teacherComment, setTeacherComment] = useState<string>("");
+  const [canSubmit, setCanSubmit] = useState<boolean>(true);
+  const slideAnim = useRef(
+    new Animated.Value(Dimensions.get("window").height)
+  ).current;
+
+  // Reset to today's Malaysia date
+  useFocusEffect(
+    React.useCallback(() => {
+      const now = new Date();
+      setSelectedDate(now);
+      setCurrentMonth(now);
+    }, [])
+  );
+
+  // Fetch attendance whenever date changes
+  useEffect(() => {
+    fetchChildrenAndAttendance();
+  }, [selectedDate]);
+
+  // Helper: Malaysia localized Date string (YYYY-MM-DD)
+  const getMalaysiaDateString = (date: Date): string => {
+    const options = {
+      timeZone: "Asia/Kuala_Lumpur",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    } as const;
+    const formatter = new Intl.DateTimeFormat("en-CA", options);
+    const parts = formatter.formatToParts(date);
+    const year = parts.find((p) => p.type === "year")?.value || "";
+    const month = parts.find((p) => p.type === "month")?.value || "";
+    const day = parts.find((p) => p.type === "day")?.value || "";
+    return `${year}-${month}-${day}`;
+  };
+
+  const formatDate = (date: Date): string =>
+    date.toLocaleDateString("en-MY", {
+      weekday: "short",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      timeZone: "Asia/Kuala_Lumpur",
+    });
+
+  // Get Malaysia Date object for "now" (to correctly reflect Malaysia timezone)
+  // Always returns Malaysia time now (UTC+8)
+  const getMalaysiaNow = (): Date => {
+    const now = new Date();
+    const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+    return new Date(utc + 8 * 60 * 60 * 1000); // Malaysia = UTC+8
+  };
+
+  // Get start of excuse window (3:00 PM Malaysia time)
+  const getExcuseWindowStart = (date: Date): Date => {
+    const malaysiaNow = getMalaysiaNow();
+    const malaysia = new Date(date);
+    const year = malaysia.getFullYear();
+    const month = malaysia.getMonth();
+    const day = malaysia.getDate();
+
+    const start = new Date(Date.UTC(year, month, day, 7, 0, 0));
+    // 3 PM MYT = 7 AM UTC
+    return start;
+  };
+
+  // End = start + 4 days (also in UTC to stay consistent)
+  const getExcuseWindowEnd = (date: Date): Date => {
+    const start = getExcuseWindowStart(date);
+    return new Date(start.getTime() + 4 * 24 * 60 * 60 * 1000);
+  };
+
+  // Friendly time diff string between two dates (target - reference)
+  const getTimeDiffString = (reference: Date, target: Date): string => {
+    if (
+      !reference ||
+      !target ||
+      isNaN(reference.getTime()) ||
+      isNaN(target.getTime())
+    ) {
+      return "Invalid time";
+    }
+
+    const diffMs = target.getTime() - reference.getTime();
+    const abs = Math.abs(diffMs);
+
+    const days = Math.floor(abs / (1000 * 60 * 60 * 24));
+    const hours = Math.floor((abs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+
+    return `${days} days ${hours} hours`;
+  };
+
+  // Compute display texts for Submission Review & Time Remaining when no submission yet
+  const computePendingTimeText = (date: Date): string => {
+    const now = getMalaysiaNow();
+    const start = getExcuseWindowStart(date);
+    const end = getExcuseWindowEnd(date);
+
+    if (now < start) {
+      const diff = getTimeDiffString(now, start);
+      return `Opens in ${diff}`;
+    } else if (now >= start && now <= end) {
+      const diff = getTimeDiffString(now, end);
+      return `${diff} left`;
+    } else {
+      return "Submission window closed";
+    }
+  };
+
+  const fetchChildrenAndAttendance = async (): Promise<void> => {
+    try {
+      // @ts-ignore
+      const currentUserID = auth.currentUser?.uid;
+      if (!currentUserID) {
+        console.error("❌ No user logged in");
+        return;
+      }
+
+      const userDoc = await getDoc(doc(db, "users", currentUserID));
+      if (!userDoc.exists()) {
+        console.error("❌ User document not found");
+        return;
+      }
+
+      const parentID = userDoc.data().id;
+      if (!parentID) {
+        console.error("❌ Parent ID not found in user document");
+        return;
+      }
+
+      const childQuery = query(
+        collection(db, "students"),
+        where("parentID", "==", parentID)
+      );
+      const childSnap = await getDocs(childQuery);
+      const childList: Child[] = childSnap.docs.map((d) => {
+        const data = d.data() as DocumentData;
+        return {
+          id: d.id,
+          name: data.name,
+          studentID: data.studentID,
+          status: "Absent",
+        };
+      });
+
+      const dateStr = getMalaysiaDateString(selectedDate);
+      const attendanceQuery = query(
+        collection(db, "attendance"),
+        where("date", "==", dateStr)
+      );
+      const attendanceSnap = await getDocs(attendanceQuery);
+
+      const attendanceMap: Record<string, string> = {};
+      attendanceSnap.forEach((d) => {
+        const data = d.data() as DocumentData;
+        attendanceMap[data.studentID] =
+          data.status === 1 ? "Present" : "Absent";
+      });
+
+      // Fetch excuse letter status for each child
+      const excuseStatusMap: Record<string, string> = {};
+      for (const child of childList) {
+        const docId = `${dateStr}_${child.studentID}`;
+        const excuseDoc = await getDoc(doc(db, "excuseLetter", docId));
+        if (excuseDoc.exists()) {
+          const data = excuseDoc.data() as DocumentData;
+          excuseStatusMap[child.studentID] = data.status || "Pending";
+        }
+      }
+
+      const combined: Child[] = childList.map((child) => ({
+        ...child,
+        status: attendanceMap[child.studentID] || "Absent",
+        excuseStatus: excuseStatusMap[child.studentID] || undefined,
+      }));
+
+      setChildren(combined);
+    } catch (err) {
+      console.error("❌ Error fetching attendance:", err);
+    }
+  };
+
+  const [hasExistingSubmission, setHasExistingSubmission] =
+    useState<boolean>(false);
+
+  const openOverlay = async (child: Child): Promise<void> => {
+    setSelectedChild(child);
+    setSelectedFileBase64(null);
+    setSelectedFileName("");
+    setExcuseText("");
+    setSubmissionReview("No submission yet");
+    setTimeRemainingText(computePendingTimeText(selectedDate));
+    setHasExistingSubmission(false); // Reset flag
+
+    // Check if submission window is open
+    const now = getMalaysiaNow();
+    const windowStart = getExcuseWindowStart(selectedDate);
+    const windowEnd = getExcuseWindowEnd(selectedDate);
+    const isWindowOpen = now >= windowStart && now <= windowEnd;
+    setCanSubmit(isWindowOpen);
+
+    try {
+      const dateStr = getMalaysiaDateString(selectedDate);
+      const docId = `${dateStr}_${child.studentID}`;
+      const excuseDoc = await getDoc(doc(db, "excuseLetter", docId));
+      if (excuseDoc.exists()) {
+        const data = excuseDoc.data() as DocumentData;
+        const status = data.status || "Pending";
+        setSubmissionReview(status);
+
+        if (status === "Denied") {
+          setHasExistingSubmission(false); // Allow resubmission
+        } else {
+          setHasExistingSubmission(true); // Block resubmission for Pending/Approved
+        }
+        setTeacherComment(data.teacherComment || "No comment from teacher yet");
+
+        const submittedAt =
+          (data.time && new Date(data.time)) ||
+          (data.submittedAt && new Date(data.submittedAt)) ||
+          null;
+        const start = getExcuseWindowStart(selectedDate);
+        if (submittedAt) {
+          const end = getExcuseWindowEnd(selectedDate);
+          const submittedRelText =
+            submittedAt.getTime() <= end.getTime()
+              ? `Submitted ${getTimeDiffString(submittedAt, end)} early`
+              : `Submitted ${getTimeDiffString(end, submittedAt)} late`;
+
+          setTimeRemainingText(submittedRelText);
+        } else {
+          setTimeRemainingText(computePendingTimeText(selectedDate));
+        }
+      } else {
+        setSubmissionReview("No submission yet");
+        setTimeRemainingText(computePendingTimeText(selectedDate));
+        setHasExistingSubmission(false);
+        setTeacherComment("");
+      }
+    } catch (err) {
+      console.error("Error fetching existing excuse:", err);
+    }
+
+    Animated.timing(slideAnim, {
+      toValue: 0,
+      duration: 300,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const closeOverlay = (): void => {
+    Animated.timing(slideAnim, {
+      toValue: Dimensions.get("window").height,
+      duration: 300,
+      useNativeDriver: true,
+    }).start(() => {
+      setSelectedChild(null);
+      setExcuseText("");
+      setSelectedFileBase64(null);
+      setSelectedFileName("");
+      setSubmissionReview("No submission yet");
+      setTimeRemainingText("—");
+      setTeacherComment("");
+    });
+  };
+
+  // Document picker -> convert PDF to base64 using new FileSystem API (SDK 54)
+  const pickPDF = async (): Promise<void> => {
+    try {
+      const res = await DocumentPicker.getDocumentAsync({
+        type: "application/pdf",
+      });
+
+      // Check if user cancelled
+      if ((res as any).type === "cancel" || (res as any).canceled) {
+        return;
+      }
+
+      // Get URI and name from the result
+      // @ts-ignore
+      const uri = res.uri || (res.assets && res.assets[0] && res.assets[0].uri);
+      // @ts-ignore
+      const pickedName =
+        res.assets && res.assets.length > 0
+          ? res.assets[0].name
+          : "Unknown File";
+
+      if (!uri) {
+        Alert.alert("File pick failed", "No file uri returned.");
+        return;
+      }
+
+      // Use new File API to read as base64
+      const file = new File(uri);
+      const base64 = await file.base64();
+
+      setSelectedFileBase64(base64);
+      setSelectedFileName(pickedName || "excuse.pdf");
+    } catch (err) {
+      console.error("Error picking PDF:", err);
+      Alert.alert("Error", "Failed to pick PDF file.");
+    }
+  };
+
+  const submitExcuse = async (): Promise<void> => {
+    if (!selectedChild) return;
+
+    // Check if there's already a submission
+    if (hasExistingSubmission && submissionReview !== "Denied") {
+      Alert.alert(
+        "Already Submitted",
+        "An excuse letter has already been submitted for this date. You cannot submit again."
+      );
+      return;
+    }
+
+    if (!selectedFileBase64) {
+      Alert.alert(
+        "Missing PDF",
+        "Please upload a PDF excuse letter before submitting."
+      );
+      return;
+    }
+
+    const reasonToSave = excuseText.trim() || "";
+
+    const now = getMalaysiaNow();
+    const windowStart = getExcuseWindowStart(selectedDate);
+    const windowEnd = getExcuseWindowEnd(selectedDate);
+
+    if (now < windowStart) {
+      Alert.alert(
+        "Too early",
+        `Excuse submission opens at 3:00 PM Malaysia time on ${formatDate(
+          selectedDate
+        )}.`
+      );
+      return;
+    }
+
+    if (now > windowEnd) {
+      Alert.alert(
+        "Submission window closed",
+        "The 4-day submission period has ended for this date."
+      );
+      return;
+    }
+
+    try {
+      const dateStr = getMalaysiaDateString(selectedDate);
+      const docId = `${dateStr}_${selectedChild.studentID}`;
+      const submissionTime = new Date();
+
+      const status = "Pending";
+
+      await setDoc(
+        doc(db, "excuseLetter", docId),
+        {
+          studentID: selectedChild.studentID,
+          name: selectedChild.name,
+          date: dateStr,
+          file: selectedFileBase64,
+          fileName: selectedFileName,
+          reason: reasonToSave,
+          time: submissionTime.toISOString(),
+          status,
+          teacherComment: "",
+        },
+        { merge: true }
+      );
+
+      let submittedText = "";
+      if (submissionTime.getTime() <= windowEnd.getTime()) {
+        const diff = getTimeDiffString(submissionTime, windowEnd);
+        submittedText = `Submitted ${diff} early`;
+      } else {
+        const diff = getTimeDiffString(windowEnd, submissionTime);
+        submittedText = `Submitted ${diff} late`;
+      }
+
+      setSubmissionReview("Pending");
+      setTimeRemainingText(submittedText);
+      setHasExistingSubmission(true);
+      setTeacherComment("");
+
+      Alert.alert("Success", "✅ Excuse letter submitted successfully!");
+      closeOverlay();
+      fetchChildrenAndAttendance(); // Refresh the list to show the new status
+    } catch (err) {
+      console.error("Error submitting excuse:", err);
+      Alert.alert(
+        "Failed",
+        "Failed to submit excuse letter. See console for details."
+      );
+    }
+  };
+
+  const getDaysInMonth = (date: Date): Date[] => {
+    const year = date.getFullYear();
+    const month = date.getMonth();
+    const firstDay = new Date(year, month, 1);
+    const lastDay = new Date(year, month + 1, 0);
+    const daysInMonth = lastDay.getDate();
+    const startingDayOfWeek = firstDay.getDay();
+
+    const days: Date[] = [];
+
+    for (let i = 0; i < startingDayOfWeek; i++) {
+      const prevMonthDay = new Date(year, month, -startingDayOfWeek + i + 1);
+      days.push(prevMonthDay);
+    }
+
+    for (let day = 1; day <= daysInMonth; day++) {
+      days.push(new Date(year, month, day));
+    }
+
+    const remainingSlots = 42 - days.length;
+    for (let i = 1; i <= remainingSlots; i++) {
+      days.push(new Date(year, month + 1, i));
+    }
+
+    return days;
+  };
+
+  const getMalaysiaDateComponents = (
+    date: Date
+  ): { year: number; month: number; day: number } => {
+    const formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Kuala_Lumpur",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+
+    const parts = formatter.formatToParts(date);
+    const year = parseInt(parts.find((p) => p.type === "year")?.value || "0");
+    const month = parseInt(parts.find((p) => p.type === "month")?.value || "0");
+    const day = parseInt(parts.find((p) => p.type === "day")?.value || "0");
+
+    return { year, month, day };
+  };
+
+  const isSameDay = (date1: Date, date2: Date): boolean => {
+    const d1 = getMalaysiaDateComponents(date1);
+    const d2 = getMalaysiaDateComponents(date2);
+
+    return d1.day === d2.day && d1.month === d2.month && d1.year === d2.year;
+  };
+
+  const isCurrentMonth = (date: Date): boolean => {
+    return (
+      date.getMonth() === currentMonth.getMonth() &&
+      date.getFullYear() === currentMonth.getFullYear()
+    );
+  };
+
+  const changeMonth = (direction: number): void => {
+    const newMonth = new Date(currentMonth);
+    newMonth.setMonth(newMonth.getMonth() + direction);
+    setCurrentMonth(newMonth);
+  };
+
+  const getMonthYearString = (): string => {
+    const months = [
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
+    ];
+    return `${months[currentMonth.getMonth()]} ${currentMonth.getFullYear()}`;
+  };
+
+  const getExcuseStatusColor = (status: string): string => {
+    switch (status) {
+      case "Pending":
+        return "#FFC107";
+      case "Approved":
+        return "#4CAF50";
+      case "Denied":
+        return "#E53935";
+      default:
+        return "#999";
+    }
+  };
+
+  const calendarDays = getDaysInMonth(currentMonth);
+  const weekDays = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <View style={styles.header}>
+        <TouchableOpacity onPress={() => router.push("/(parent)/home")}>
+          <Ionicons name="arrow-back" size={22} color="#fff" />
+        </TouchableOpacity>
+        <Text style={styles.headerTitle}>Attendance</Text>
+        <View style={{ width: 22 }} />
+      </View>
+
+      <View style={styles.calendarContainer}>
+        <View style={styles.monthNavigation}>
+          <TouchableOpacity onPress={() => changeMonth(-1)}>
+            <Ionicons name="chevron-back" size={24} color="#fff" />
+          </TouchableOpacity>
+          <Text style={styles.monthText}>{getMonthYearString()}</Text>
+          <TouchableOpacity onPress={() => changeMonth(1)}>
+            <Ionicons name="chevron-forward" size={24} color="#fff" />
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.weekDaysContainer}>
+          {weekDays.map((d) => (
+            <View key={d} style={styles.weekDayCell}>
+              <Text style={styles.weekDayText}>{d}</Text>
+            </View>
+          ))}
+        </View>
+
+        <View style={styles.calendarGrid}>
+          {calendarDays.map((day, index) => {
+            const isSelected = isSameDay(day, selectedDate);
+            const isToday = isSameDay(day, new Date());
+            const inCurrentMonth = isCurrentMonth(day);
+
+            return (
+              <TouchableOpacity
+                key={index}
+                style={[
+                  styles.dayCell,
+                  isSelected && styles.selectedDay,
+                  isToday && !isSelected && styles.todayDay,
+                ]}
+                onPress={() => setSelectedDate(day)}
+              >
+                <Text
+                  style={[
+                    styles.dayText,
+                    !inCurrentMonth && styles.otherMonthText,
+                    isSelected && styles.selectedDayText,
+                    isToday && !isSelected && styles.todayText,
+                  ]}
+                >
+                  {day.getDate()}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
+
+      <ScrollView style={styles.childList}>
+        {children.map((child) => (
+          <View key={child.id} style={styles.childRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.childName}>{child.name}</Text>
+              {child.status === "Absent" && child.excuseStatus && (
+                <View style={styles.excuseStatusContainer}>
+                  <View
+                    style={[
+                      styles.excuseStatusDot,
+                      {
+                        backgroundColor: getExcuseStatusColor(
+                          child.excuseStatus
+                        ),
+                      },
+                    ]}
+                  />
+                  <Text
+                    style={[
+                      styles.excuseStatusText,
+                      { color: getExcuseStatusColor(child.excuseStatus) },
+                    ]}
+                  >
+                    Excuse: {child.excuseStatus}
+                  </Text>
+                </View>
+              )}
+            </View>
+            <TouchableOpacity
+              disabled={child.status !== "Absent"}
+              onPress={() => openOverlay(child)}
+              style={[
+                styles.statusButton,
+                child.status === "Present" ? styles.present : styles.absent,
+              ]}
+            >
+              <Text
+                style={{
+                  color: child.status === "Present" ? "#2E7D32" : "#E53935",
+                  textDecorationLine:
+                    child.status === "Absent" ? "underline" : "none",
+                  fontWeight: "bold",
+                }}
+              >
+                {child.status}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        ))}
+      </ScrollView>
+
+      {selectedChild && (
+        <Animated.View
+          style={[
+            styles.overlayContainer,
+            { transform: [{ translateY: slideAnim }] },
+          ]}
+        >
+          <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+            <View style={{ flex: 1 }} />
+          </TouchableWithoutFeedback>
+
+          <KeyboardAvoidingView
+            behavior={Platform.OS === "ios" ? "padding" : "height"}
+            style={{ maxHeight: "80%" }}
+          >
+            <ScrollView
+              style={styles.overlayContent}
+              keyboardShouldPersistTaps="handled"
+            >
+              <Text style={styles.overlayName}>{selectedChild.name}</Text>
+              <Text style={styles.overlayDate}>{formatDate(selectedDate)}</Text>
+              <Text style={styles.excuseHeader}>Excuse Letter</Text>
+
+              <View style={styles.excuseTable}>
+                <View style={styles.excuseRow}>
+                  <Text style={styles.excuseLabel}>Submission Review</Text>
+                  <Text
+                    style={[
+                      styles.excuseValue,
+                      submissionReview === "Pending" && {
+                        color: "#FF9800",
+                        fontWeight: "bold",
+                      },
+                      submissionReview === "Approved" && {
+                        color: "#4CAF50",
+                        fontWeight: "bold",
+                      },
+                      submissionReview === "Denied" && {
+                        color: "#E53935",
+                        fontWeight: "bold",
+                      },
+                    ]}
+                  >
+                    {submissionReview}
+                  </Text>
+                </View>
+
+                <View style={styles.excuseRow}>
+                  <Text style={styles.excuseLabel}>Time Remaining</Text>
+                  <Text style={styles.excuseValue}>{timeRemainingText}</Text>
+                </View>
+
+                <View style={styles.excuseRow}>
+                  <Text style={styles.excuseLabel}>File Submission</Text>
+                  <TouchableOpacity
+                    onPress={pickPDF}
+                    disabled={
+                      !canSubmit ||
+                      (hasExistingSubmission && submissionReview !== "Denied")
+                    }
+                  >
+                    <Text
+                      style={{
+                        color:
+                          !canSubmit ||
+                          (hasExistingSubmission &&
+                            submissionReview !== "Denied")
+                            ? "#999"
+                            : "#67BA03",
+                        fontWeight: "bold",
+                      }}
+                    >
+                      {selectedFileName ? selectedFileName : "Choose PDF"}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.excuseRow}>
+                  <Text style={styles.excuseLabel}>Comment</Text>
+                  {/*<TextInput
+                    style={styles.commentInput}
+                    placeholder="Write your excuse (optional)..."
+                    placeholderTextColor="#b9b3b3ff"
+                    value={excuseText}
+                    onChangeText={setExcuseText}
+                    multiline
+                    editable={canSubmit && !hasExistingSubmission}
+                  />*/}
+                  <Text style={styles.excuseValue}>
+                    {teacherComment || "No comment from teacher yet"}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.overlayButtons}>
+                <TouchableOpacity
+                  style={[
+                    styles.submitBtn,
+                    (!canSubmit ||
+                      (hasExistingSubmission &&
+                        submissionReview !== "Denied")) &&
+                      styles.submitBtnDisabled,
+                  ]}
+                  onPress={submitExcuse}
+                  disabled={
+                    !canSubmit ||
+                    (hasExistingSubmission && submissionReview !== "Denied")
+                  }
+                >
+                  <Text style={styles.btnActionText}>
+                    {submissionReview === "Denied"
+                      ? "RESUBMIT"
+                      : hasExistingSubmission
+                      ? "ALREADY SUBMITTED"
+                      : !canSubmit
+                      ? "WINDOW CLOSED"
+                      : "SUBMIT"}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              <TouchableOpacity onPress={closeOverlay} style={styles.closeBtn}>
+                <Text style={styles.closeBtnText}>Close</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </KeyboardAvoidingView>
+        </Animated.View>
+      )}
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: "#F7F8FA" },
+  header: {
+    backgroundColor: "#67BA03",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 22,
+    paddingHorizontal: 20,
+  },
+  headerTitle: {
+    color: "#fff",
+    fontSize: 20,
+    fontWeight: "bold",
+    textAlign: "center",
+  },
+  calendarContainer: {
+    backgroundColor: "#67BA03",
+    paddingHorizontal: 15,
+    paddingBottom: 15,
+  },
+  monthNavigation: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 10,
+  },
+  monthText: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "bold",
+  },
+  weekDaysContainer: {
+    flexDirection: "row",
+    marginBottom: 5,
+  },
+  weekDayCell: {
+    flex: 1,
+    alignItems: "center",
+    paddingVertical: 8,
+  },
+  weekDayText: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  calendarGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+  },
+  dayCell: {
+    width: "14.28%",
+    aspectRatio: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 15,
+  },
+  selectedDay: {
+    backgroundColor: "#fff",
+    borderRadius: 20,
+    borderWidth: 2,
+    borderColor: "#fff",
+  },
+  todayDay: {
+    borderWidth: 2,
+    borderColor: "#fff",
+    borderRadius: 20,
+  },
+  dayText: {
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: "500",
+  },
+  selectedDayText: {
+    color: "#67BA03",
+    fontWeight: "bold",
+  },
+  todayText: {
+    fontWeight: "bold",
+  },
+  otherMonthText: {
+    color: "rgba(255, 255, 255, 0.4)",
+  },
+  childList: { paddingHorizontal: 15, marginTop: 10 },
+  childRow: {
+    flexDirection: "row",
+    backgroundColor: "#fff",
+    borderRadius: 10,
+    padding: 15,
+    marginVertical: 5,
+    alignItems: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  childName: { fontSize: 15, fontWeight: "500", color: "#333" },
+  excuseStatusContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 4,
+  },
+  excuseStatusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+  excuseStatusText: {
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  statusButton: {
+    borderRadius: 20,
+    paddingVertical: 6,
+    paddingHorizontal: 15,
+  },
+  present: { backgroundColor: "#E8F8E0" },
+  absent: { backgroundColor: "#FDE8E8" },
+  overlayContainer: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    top: 0,
+    justifyContent: "flex-end",
+    backgroundColor: "rgba(0,0,0,0.4)",
+  },
+  overlayContent: {
+    backgroundColor: "#fff",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    padding: 20,
+  },
+  overlayName: { fontSize: 16, fontWeight: "bold", color: "#333" },
+  overlayDate: { fontSize: 13, color: "#777", marginBottom: 10 },
+  excuseHeader: {
+    fontSize: 15,
+    fontWeight: "bold",
+    color: "#333",
+    marginBottom: 8,
+  },
+  excuseTable: {
+    backgroundColor: "#E8F8E0",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#C8E6C9",
+    marginBottom: 15,
+  },
+  excuseRow: {
+    flexDirection: "row",
+    borderBottomWidth: 1,
+    borderColor: "#C8E6C9",
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    alignItems: "center",
+  },
+  excuseLabel: {
+    flex: 1,
+    fontWeight: "bold",
+    fontSize: 13,
+    color: "#333",
+  },
+  excuseValue: {
+    flex: 2,
+    fontSize: 13,
+    color: "#333",
+  },
+  commentInput: {
+    flex: 2,
+    borderWidth: 1,
+    borderColor: "#C8E6C9",
+    borderRadius: 6,
+    padding: 5,
+    backgroundColor: "#fff",
+    fontSize: 13,
+    minHeight: 40,
+  },
+  overlayButtons: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginVertical: 10,
+  },
+  submitBtn: {
+    flex: 1,
+    backgroundColor: "#67BA03",
+    borderRadius: 30,
+    paddingVertical: 10,
+    alignItems: "center",
+  },
+  submitBtnDisabled: {
+    backgroundColor: "#CCCCCC",
+    opacity: 0.6,
+  },
+  btnActionText: {
+    color: "#fff",
+    fontWeight: "bold",
+    fontSize: 13,
+  },
+  closeBtn: {
+    alignSelf: "center",
+    marginTop: 8,
+  },
+  closeBtnText: {
+    color: "#67BA03",
+    fontWeight: "bold",
+    fontSize: 15,
+    marginBottom: 20,
+  },
+});
